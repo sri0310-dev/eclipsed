@@ -6,8 +6,11 @@ export async function GET(request: NextRequest) {
   const error = request.nextUrl.searchParams.get("error");
   const errorDescription = request.nextUrl.searchParams.get("error_description");
 
+  const host = request.headers.get("host") || "localhost:3000";
+  const protocol = host.startsWith("localhost") ? "http" : "https";
+  const appUrl = `${protocol}://${host}`;
+
   if (error) {
-    const appUrl = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
     return NextResponse.redirect(
       `${appUrl}?auth_error=${encodeURIComponent(errorDescription || error)}`
     );
@@ -21,12 +24,10 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    await exchangeCodeForToken(code);
-    const appUrl = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
+    await exchangeCodeForToken(code, host);
     return NextResponse.redirect(`${appUrl}?auth_success=true`);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Token exchange failed";
-    const appUrl = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
     return NextResponse.redirect(
       `${appUrl}?auth_error=${encodeURIComponent(message)}`
     );

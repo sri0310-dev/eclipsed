@@ -1,5 +1,5 @@
 import { Client } from "@microsoft/microsoft-graph-client";
-import { getMsalClient, GRAPH_SCOPES, REDIRECT_URI } from "./msal-config";
+import { getMsalClient, GRAPH_SCOPES, getRedirectUri } from "./msal-config";
 import { getStoredToken, storeToken } from "./token-store";
 import type {
   SheetDataResponse,
@@ -32,22 +32,18 @@ async function getAccessToken(): Promise<string> {
 
 // ─── Authentication ────────────────────────────────────────────────────────
 
-export function getAuthUrl(): string {
-  const msalClient = getMsalClient();
-  const authCodeUrlParameters = {
-    scopes: GRAPH_SCOPES,
-    redirectUri: REDIRECT_URI,
-  };
-  // We need to return a promise, but for URL generation we'll use the sync pattern
-  return `https://login.microsoftonline.com/${process.env.AZURE_TENANT_ID}/oauth2/v2.0/authorize?client_id=${process.env.AZURE_CLIENT_ID}&response_type=code&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&scope=${encodeURIComponent(GRAPH_SCOPES.join(" "))}&response_mode=query`;
+export function getAuthUrl(host?: string): string {
+  const redirectUri = getRedirectUri(host);
+  return `https://login.microsoftonline.com/${process.env.AZURE_TENANT_ID}/oauth2/v2.0/authorize?client_id=${process.env.AZURE_CLIENT_ID}&response_type=code&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent(GRAPH_SCOPES.join(" "))}&response_mode=query`;
 }
 
-export async function exchangeCodeForToken(code: string): Promise<void> {
+export async function exchangeCodeForToken(code: string, host?: string): Promise<void> {
   const msalClient = getMsalClient();
+  const redirectUri = getRedirectUri(host);
   const tokenRequest = {
     code,
     scopes: GRAPH_SCOPES,
-    redirectUri: REDIRECT_URI,
+    redirectUri,
   };
 
   const response = await msalClient.acquireTokenByCode(tokenRequest);

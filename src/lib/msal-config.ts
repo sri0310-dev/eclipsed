@@ -33,4 +33,18 @@ export const GRAPH_SCOPES = [
   "https://graph.microsoft.com/User.Read",
 ];
 
-export const REDIRECT_URI = process.env.AZURE_REDIRECT_URI!;
+const CALLBACK_PATH = "/api/onedrive/auth/callback";
+
+/**
+ * Build the redirect URI dynamically from the incoming request host.
+ * This way it works on both localhost:3000 and eclipsed-eight.vercel.app
+ * without needing to change env vars per environment.
+ */
+export function getRedirectUri(host?: string): string {
+  if (host) {
+    const protocol = host.startsWith("localhost") ? "http" : "https";
+    return `${protocol}://${host}${CALLBACK_PATH}`;
+  }
+  // Fallback to env var
+  return process.env.AZURE_REDIRECT_URI || `http://localhost:3000${CALLBACK_PATH}`;
+}
