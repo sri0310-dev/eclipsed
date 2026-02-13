@@ -13,6 +13,7 @@ export default function ConnectionStatus() {
   const [status, setStatus] = useState<StatusData | null>(null);
   const [loading, setLoading] = useState(true);
   const [authUrl, setAuthUrl] = useState<string | null>(null);
+  const [authError, setAuthError] = useState<string | null>(null);
 
   const checkStatus = async () => {
     setLoading(true);
@@ -43,7 +44,7 @@ export default function ConnectionStatus() {
       window.history.replaceState({}, "", "/");
     }
     if (params.get("auth_error")) {
-      alert("Auth error: " + params.get("auth_error"));
+      setAuthError(params.get("auth_error"));
       window.history.replaceState({}, "", "/");
     }
   }, []);
@@ -66,7 +67,7 @@ export default function ConnectionStatus() {
       </h2>
 
       <div className="space-y-3">
-        {/* Graph API auth status — primary */}
+        {/* Graph API auth status */}
         <div className="flex items-center gap-3">
           <div
             className={`h-3 w-3 rounded-full ${
@@ -80,11 +81,11 @@ export default function ConnectionStatus() {
           </span>
         </div>
 
-        {status?.configuredFileId && (
+        {status?.configuredShareUrl && (
           <div className="flex items-center gap-3">
             <div className="h-3 w-3 rounded-full bg-emerald-500" />
-            <span className="text-zinc-300 text-sm font-mono">
-              File: {status.configuredFileId.slice(0, 20)}...
+            <span className="text-zinc-300 text-sm">
+              Share URL configured
             </span>
           </div>
         )}
@@ -93,7 +94,7 @@ export default function ConnectionStatus() {
           <div className="flex items-center gap-3">
             <div className="h-3 w-3 rounded-full bg-emerald-500" />
             <span className="text-zinc-300 text-sm">
-              Worksheet: {status.configuredWorksheet}
+              Default worksheet: {status.configuredWorksheet}
             </span>
           </div>
         )}
@@ -105,6 +106,31 @@ export default function ConnectionStatus() {
           >
             Connect to Microsoft OneDrive
           </a>
+        )}
+
+        {authError && (
+          <div className="mt-3 p-3 bg-red-900/30 border border-red-700 rounded-lg text-sm text-red-300 space-y-2">
+            <div className="font-medium">Connection failed</div>
+            <div className="text-xs text-red-400">{authError}</div>
+            {authError.includes("70000") && (
+              <div className="text-xs text-amber-400 mt-2 p-2 bg-amber-900/20 border border-amber-800 rounded">
+                <strong>Fix:</strong> In Azure Portal &gt; App Registration
+                &gt; Manifest, change{" "}
+                <code className="bg-zinc-900 px-1 rounded">
+                  &quot;signInAudience&quot;
+                </code>{" "}
+                from{" "}
+                <code className="bg-zinc-900 px-1 rounded text-red-300">
+                  &quot;AzureADMyOrg&quot;
+                </code>{" "}
+                to{" "}
+                <code className="bg-zinc-900 px-1 rounded text-emerald-300">
+                  &quot;PersonalMicrosoftAccount&quot;
+                </code>
+                , then save and redeploy.
+              </div>
+            )}
+          </div>
         )}
 
         {status?.authenticated && (

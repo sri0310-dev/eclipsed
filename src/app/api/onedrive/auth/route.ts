@@ -15,7 +15,7 @@ export async function GET(request: NextRequest) {
   }
 
   // Return the auth URL for the client to redirect to
-  const authUrl = getAuthUrl(host);
+  const authUrl = await getAuthUrl(host);
   return NextResponse.json({
     success: true,
     authenticated: false,

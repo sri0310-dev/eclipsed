@@ -1,6 +1,7 @@
 import ConnectionStatus from "@/components/ConnectionStatus";
 import SpreadsheetViewer from "@/components/SpreadsheetViewer";
 import SpreadsheetWriter from "@/components/SpreadsheetWriter";
+import WorksheetManager from "@/components/WorksheetManager";
 import FileSearch from "@/components/FileSearch";
 
 export default function Home() {
@@ -41,6 +42,18 @@ export default function Home() {
                 <li className="flex gap-2">
                   <span className="text-zinc-500 font-mono">1.</span>
                   <span>
+                    In{" "}
+                    <span className="text-blue-400">Azure App Registration</span>
+                    {" "}&gt; Manifest, confirm{" "}
+                    <code className="text-xs bg-zinc-900 px-1.5 py-0.5 rounded text-amber-400">
+                      &quot;signInAudience&quot;: &quot;PersonalMicrosoftAccount&quot;
+                    </code>
+                    {" "}(not &quot;AzureADMyOrg&quot;)
+                  </span>
+                </li>
+                <li className="flex gap-2">
+                  <span className="text-zinc-500 font-mono">2.</span>
+                  <span>
                     Click{" "}
                     <span className="text-blue-400">
                       &quot;Connect to Microsoft OneDrive&quot;
@@ -50,44 +63,36 @@ export default function Home() {
                   </span>
                 </li>
                 <li className="flex gap-2">
-                  <span className="text-zinc-500 font-mono">2.</span>
+                  <span className="text-zinc-500 font-mono">3.</span>
                   <span>
-                    Ask your colleague to{" "}
-                    <span className="text-amber-400">share the Excel file</span>{" "}
-                    and copy the sharing URL (e.g.{" "}
+                    Get the{" "}
+                    <span className="text-amber-400">sharing URL</span>{" "}
+                    from your colleague (e.g.{" "}
                     <code className="text-xs bg-zinc-900 px-1 rounded text-zinc-500">
                       https://1drv.ms/x/...
                     </code>
-                    )
-                  </span>
-                </li>
-                <li className="flex gap-2">
-                  <span className="text-zinc-500 font-mono">3.</span>
-                  <span>
-                    Set{" "}
+                    ) — set as{" "}
                     <code className="text-xs bg-zinc-900 px-1.5 py-0.5 rounded text-zinc-300">
                       ONEDRIVE_SHARE_URL
                     </code>{" "}
-                    and{" "}
-                    <code className="text-xs bg-zinc-900 px-1.5 py-0.5 rounded text-zinc-300">
-                      ONEDRIVE_WORKSHEET_NAME
-                    </code>{" "}
-                    in Vercel env vars
+                    or paste directly in the UI
                   </span>
                 </li>
                 <li className="flex gap-2">
                   <span className="text-zinc-500 font-mono">4.</span>
                   <span>
                     Use{" "}
-                    <span className="text-blue-400">&quot;Live (Share URL)&quot;</span>{" "}
-                    mode — dynamic read/write via Graph API, just like Google
-                    Sheets
+                    <span className="text-blue-400">Worksheet Manager</span>{" "}
+                    to list &amp; create worksheets — no env changes needed
                   </span>
                 </li>
               </ol>
             </div>
           </div>
         </div>
+
+        {/* Worksheet Manager */}
+        <WorksheetManager />
 
         {/* File Search */}
         <FileSearch />

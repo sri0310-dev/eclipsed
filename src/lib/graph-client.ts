@@ -73,10 +73,23 @@ function sharesItemPath(shareUrl: string): string {
 
 // ─── Authentication ────────────────────────────────────────────────────────
 
-export function getAuthUrl(host?: string): string {
+/**
+ * Generate the Microsoft OAuth authorization URL using MSAL's built-in method.
+ * This ensures the authorize and token-exchange steps use identical scope sets
+ * (MSAL internally adds openid/profile), preventing AADSTS70000 mismatches.
+ */
+export async function getAuthUrl(host?: string): Promise<string> {
+  const msalClient = getMsalClient();
   const redirectUri = getRedirectUri(host);
-  const tenant = process.env.AZURE_TENANT_ID || "common";
-  return `https://login.microsoftonline.com/${tenant}/oauth2/v2.0/authorize?client_id=${process.env.AZURE_CLIENT_ID}&response_type=code&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent(GRAPH_SCOPES.join(" "))}&response_mode=query`;
+
+  const authCodeUrl = await msalClient.getAuthCodeUrl({
+    scopes: GRAPH_SCOPES,
+    redirectUri,
+    responseMode: "query",
+    prompt: "consent",
+  });
+
+  return authCodeUrl;
 }
 
 export async function exchangeCodeForToken(code: string, host?: string): Promise<void> {
@@ -346,4 +359,32 @@ export async function listWorksheetsViaShareUrl(
       position: ws.position,
     })
   );
+}
+
+export async function createWorksheetViaShareUrl(
+  shareUrl: string,
+  name: string
+): Promise<{ id: string; name: string; position: number }> {
+  const accessToken = await getAccessToken();
+  const client = getAuthenticatedClient(accessToken);
+
+  const result = await client
+    .api(`${sharesItemPath(shareUrl)}/workbook/worksheets/add`)
+    .post({ name });
+
+  return { id: result.id, name: result.name, position: result.position };
+}
+
+export async function createWorksheet(
+  fileId: string,
+  name: string
+): Promise<{ id: string; name: string; position: number }> {
+  const accessToken = await getAccessToken();
+  const client = getAuthenticatedClient(accessToken);
+
+  const result = await client
+    .api(`${itemPath(fileId)}/workbook/worksheets/add`)
+    .post({ name });
+
+  return { id: result.id, name: result.name, position: result.position };
 }

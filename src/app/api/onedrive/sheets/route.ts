@@ -8,6 +8,8 @@ import {
   readSheetViaShareUrl,
   writeSheetViaShareUrl,
   listWorksheetsViaShareUrl,
+  createWorksheetViaShareUrl,
+  createWorksheet,
 } from "@/lib/graph-client";
 import {
   readFromShareUrl,
@@ -262,7 +264,10 @@ export async function POST(request: NextRequest) {
     const worksheet =
       body.worksheet || process.env.ONEDRIVE_WORKSHEET_NAME || "Sheet1";
 
-    if (!range || !values || !Array.isArray(values)) {
+    // Create-worksheet actions don't need range/values
+    if (action === "share-graph-create-worksheet" || action === "create-worksheet") {
+      // handled below — skip range/values validation
+    } else if (!range || !values || !Array.isArray(values)) {
       return NextResponse.json(
         {
           success: false,
@@ -296,8 +301,46 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: true, data: result });
     }
 
+    if (action === "share-graph-create-worksheet") {
+      const shareUrl = body.url || process.env.ONEDRIVE_SHARE_URL;
+      const name = body.name;
+      if (!shareUrl) {
+        return NextResponse.json(
+          { success: false, error: "No sharing URL provided." },
+          { status: 400 }
+        );
+      }
+      if (!name) {
+        return NextResponse.json(
+          { success: false, error: "Worksheet 'name' is required." },
+          { status: 400 }
+        );
+      }
+      const result = await createWorksheetViaShareUrl(shareUrl, name);
+      return NextResponse.json({ success: true, data: result });
+    }
+
+    if (action === "create-worksheet") {
+      const fileId = body.fileId || process.env.ONEDRIVE_FILE_ID;
+      const name = body.name;
+      if (!fileId) {
+        return NextResponse.json(
+          { success: false, error: "No file ID provided." },
+          { status: 400 }
+        );
+      }
+      if (!name) {
+        return NextResponse.json(
+          { success: false, error: "Worksheet 'name' is required." },
+          { status: 400 }
+        );
+      }
+      const result = await createWorksheet(fileId, name);
+      return NextResponse.json({ success: true, data: result });
+    }
+
     return NextResponse.json(
-      { success: false, error: `Unknown action: ${action}. Use "write" or "share-graph-write".` },
+      { success: false, error: `Unknown action: ${action}` },
       { status: 400 }
     );
   } catch (err) {

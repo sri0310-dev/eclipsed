@@ -27,13 +27,13 @@ export function getMsalClient(): ConfidentialClientApplication {
   return msalInstance;
 }
 
-// Scopes needed for OneDrive/Excel operations
+// Scopes needed for OneDrive/Excel operations.
 // Files.ReadWrite (without .All) works with personal accounts without publisher verification.
-// Shared file access is handled via the /shares/{encoded-url} Graph API endpoint,
-// which uses the sharing link itself as authorization.
+// offline_access ensures we can refresh tokens without re-prompting.
 export const GRAPH_SCOPES = [
-  "https://graph.microsoft.com/Files.ReadWrite",
-  "https://graph.microsoft.com/User.Read",
+  "Files.ReadWrite",
+  "User.Read",
+  "offline_access",
 ];
 
 const CALLBACK_PATH = "/api/onedrive/auth/callback";
