@@ -2,6 +2,8 @@
 
 import { useState } from "react";
 
+type WriteMode = "share-graph" | "file-id";
+
 export default function SpreadsheetWriter() {
   const [range, setRange] = useState("A1:C2");
   const [valuesText, setValuesText] = useState(
@@ -14,8 +16,10 @@ export default function SpreadsheetWriter() {
       2
     )
   );
+  const [shareUrl, setShareUrl] = useState("");
   const [fileId, setFileId] = useState("");
   const [worksheet, setWorksheet] = useState("");
+  const [mode, setMode] = useState<WriteMode>("share-graph");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -41,11 +45,12 @@ export default function SpreadsheetWriter() {
 
     try {
       const body: Record<string, unknown> = {
-        action: "write",
+        action: mode === "share-graph" ? "share-graph-write" : "write",
         range,
         values,
       };
-      if (fileId) body.fileId = fileId;
+      if (mode === "share-graph" && shareUrl) body.url = shareUrl;
+      if (mode === "file-id" && fileId) body.fileId = fileId;
       if (worksheet) body.worksheet = worksheet;
 
       const res = await fetch("/api/onedrive/sheets", {
@@ -71,23 +76,62 @@ export default function SpreadsheetWriter() {
 
   return (
     <div className="rounded-lg border border-zinc-700 bg-zinc-800/50 p-6">
-      <h2 className="text-lg font-semibold text-zinc-100 mb-4">
-        Write to Spreadsheet
-      </h2>
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-lg font-semibold text-zinc-100">
+          Write to Spreadsheet
+        </h2>
+        <div className="flex bg-zinc-900 rounded-lg p-0.5">
+          <button
+            onClick={() => setMode("share-graph")}
+            className={`px-3 py-1 text-xs rounded-md transition-colors ${
+              mode === "share-graph"
+                ? "bg-blue-600 text-white"
+                : "text-zinc-400 hover:text-zinc-200"
+            }`}
+          >
+            Live (Share URL)
+          </button>
+          <button
+            onClick={() => setMode("file-id")}
+            className={`px-3 py-1 text-xs rounded-md transition-colors ${
+              mode === "file-id"
+                ? "bg-blue-600 text-white"
+                : "text-zinc-400 hover:text-zinc-200"
+            }`}
+          >
+            File ID
+          </button>
+        </div>
+      </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
-        <div>
-          <label className="block text-xs text-zinc-400 mb-1">
-            File ID (optional override)
-          </label>
-          <input
-            type="text"
-            value={fileId}
-            onChange={(e) => setFileId(e.target.value)}
-            placeholder="Uses .env default"
-            className="w-full px-3 py-2 bg-zinc-900 border border-zinc-600 rounded-lg text-sm text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-blue-500"
-          />
-        </div>
+        {mode === "share-graph" ? (
+          <div className="md:col-span-3">
+            <label className="block text-xs text-zinc-400 mb-1">
+              OneDrive Sharing URL
+            </label>
+            <input
+              type="text"
+              value={shareUrl}
+              onChange={(e) => setShareUrl(e.target.value)}
+              placeholder="Uses ONEDRIVE_SHARE_URL env var if empty"
+              className="w-full px-3 py-2 bg-zinc-900 border border-zinc-600 rounded-lg text-sm text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-blue-500"
+            />
+          </div>
+        ) : (
+          <div>
+            <label className="block text-xs text-zinc-400 mb-1">
+              File ID (optional override)
+            </label>
+            <input
+              type="text"
+              value={fileId}
+              onChange={(e) => setFileId(e.target.value)}
+              placeholder="Uses .env default"
+              className="w-full px-3 py-2 bg-zinc-900 border border-zinc-600 rounded-lg text-sm text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-blue-500"
+            />
+          </div>
+        )}
         <div>
           <label className="block text-xs text-zinc-400 mb-1">
             Worksheet (optional override)

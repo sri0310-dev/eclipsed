@@ -28,9 +28,11 @@ export function getMsalClient(): ConfidentialClientApplication {
 }
 
 // Scopes needed for OneDrive/Excel operations
-// Files.ReadWrite.All is required to access files shared by others
+// Files.ReadWrite (without .All) works with personal accounts without publisher verification.
+// Shared file access is handled via the /shares/{encoded-url} Graph API endpoint,
+// which uses the sharing link itself as authorization.
 export const GRAPH_SCOPES = [
-  "https://graph.microsoft.com/Files.ReadWrite.All",
+  "https://graph.microsoft.com/Files.ReadWrite",
   "https://graph.microsoft.com/User.Read",
 ];
 

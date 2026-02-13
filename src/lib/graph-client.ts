@@ -49,6 +49,28 @@ function itemPath(fileId: string): string {
   return `/me/drive/items/${fileId}`;
 }
 
+/**
+ * Encode a OneDrive sharing URL into a share token for the Graph /shares/ endpoint.
+ * See: https://learn.microsoft.com/en-us/graph/api/shares-get
+ */
+function encodeSharingUrl(url: string): string {
+  const base64 = Buffer.from(url)
+    .toString("base64")
+    .replace(/\//g, "_")
+    .replace(/\+/g, "-")
+    .replace(/=+$/, "");
+  return `u!${base64}`;
+}
+
+/**
+ * Build the base path for a shared file via its sharing URL.
+ * Uses the /shares/{encoded}/driveItem endpoint.
+ */
+function sharesItemPath(shareUrl: string): string {
+  const token = encodeSharingUrl(shareUrl);
+  return `/shares/${token}/driveItem`;
+}
+
 // ─── Authentication ────────────────────────────────────────────────────────
 
 export function getAuthUrl(host?: string): string {
@@ -241,6 +263,80 @@ export async function listWorksheets(
 
   const result = await client
     .api(`${itemPath(fileId)}/workbook/worksheets`)
+    .get();
+
+  return result.value.map(
+    (ws: { id: string; name: string; position: number }) => ({
+      id: ws.id,
+      name: ws.name,
+      position: ws.position,
+    })
+  );
+}
+
+// ─── Sharing URL-based operations (no Files.ReadWrite.All needed) ─────────
+// These use the /shares/{encoded-url}/driveItem/workbook/... Graph API endpoint.
+// The sharing URL itself provides authorization to the file, so only
+// Files.ReadWrite scope (not .All) is required.
+
+export async function readSheetViaShareUrl(
+  shareUrl: string,
+  worksheet: string,
+  range?: string
+): Promise<SheetDataResponse> {
+  const accessToken = await getAccessToken();
+  const client = getAuthenticatedClient(accessToken);
+
+  const basePath = `${sharesItemPath(shareUrl)}/workbook/worksheets/${worksheet}`;
+  const apiPath = range
+    ? `${basePath}/range(address='${range}')`
+    : `${basePath}/usedRange`;
+
+  const result: SheetRange = await client.api(apiPath).get();
+
+  const headers = (result.values[0] || []).map((h) => String(h ?? ""));
+  const rows = result.values.slice(1).map((row) => {
+    const obj: Record<string, string | number | boolean | null> = {};
+    headers.forEach((header, i) => {
+      obj[header] = row[i] ?? null;
+    });
+    return obj;
+  });
+
+  return {
+    headers,
+    rows,
+    rawValues: result.values,
+    range: result.address,
+  };
+}
+
+export async function writeSheetViaShareUrl(
+  shareUrl: string,
+  worksheet: string,
+  range: string,
+  values: (string | number | boolean | null)[][]
+): Promise<SheetRange> {
+  const accessToken = await getAccessToken();
+  const client = getAuthenticatedClient(accessToken);
+
+  const result = await client
+    .api(
+      `${sharesItemPath(shareUrl)}/workbook/worksheets/${worksheet}/range(address='${range}')`
+    )
+    .patch({ values });
+
+  return result as SheetRange;
+}
+
+export async function listWorksheetsViaShareUrl(
+  shareUrl: string
+): Promise<{ id: string; name: string; position: number }[]> {
+  const accessToken = await getAccessToken();
+  const client = getAuthenticatedClient(accessToken);
+
+  const result = await client
+    .api(`${sharesItemPath(shareUrl)}/workbook/worksheets`)
     .get();
 
   return result.value.map(

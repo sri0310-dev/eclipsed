@@ -5,6 +5,9 @@ import {
   listWorksheets,
   searchFiles,
   listSharedWithMe,
+  readSheetViaShareUrl,
+  writeSheetViaShareUrl,
+  listWorksheetsViaShareUrl,
 } from "@/lib/graph-client";
 import {
   readFromShareUrl,
@@ -26,11 +29,12 @@ function unauthorized(): NextResponse<ApiResponse> {
  * Query params:
  *   action: "read" | "worksheets" | "search" | "shared" | "status"
  *           | "share-read" | "share-worksheets"
+ *           | "share-graph-read" | "share-graph-worksheets"
  *   fileId: OneDrive file ID, or composite "driveId:itemId" for shared files
  *   worksheet: worksheet name (or uses env default)
  *   range: cell range like "A1:Z100" (optional, defaults to used range)
  *   filename: search query for file discovery
- *   url: OneDrive sharing URL (for share-read / share-worksheets actions)
+ *   url: OneDrive sharing URL (for share-* actions)
  */
 export async function GET(request: NextRequest) {
   const params = request.nextUrl.searchParams;
@@ -50,8 +54,70 @@ export async function GET(request: NextRequest) {
     });
   }
 
-  // ── Actions that bypass Graph API (no auth / no SPO needed) ───────────
-  // These download .xlsx directly from the public sharing URL
+  // ── Live Graph API via sharing URL (primary method) ─────────────────────
+  // Uses /shares/{encoded-url}/driveItem/workbook/... for live read/write.
+  // Only requires Files.ReadWrite scope (not .All) — works with personal accounts.
+
+  if (action === "share-graph-read") {
+    if (!isAuthenticated()) return unauthorized();
+
+    const shareUrl =
+      params.get("url") || process.env.ONEDRIVE_SHARE_URL;
+    if (!shareUrl) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "No sharing URL provided. Set ONEDRIVE_SHARE_URL env var or pass ?url=...",
+        },
+        { status: 400 }
+      );
+    }
+    const worksheet =
+      params.get("worksheet") || process.env.ONEDRIVE_WORKSHEET_NAME || "Sheet1";
+    const range = params.get("range") || undefined;
+    try {
+      const data: SheetDataResponse = await readSheetViaShareUrl(
+        shareUrl,
+        worksheet,
+        range
+      );
+      return NextResponse.json({ success: true, data });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      console.error("[OneDrive API] share-graph-read error:", message);
+      return NextResponse.json(
+        { success: false, error: message },
+        { status: 500 }
+      );
+    }
+  }
+
+  if (action === "share-graph-worksheets") {
+    if (!isAuthenticated()) return unauthorized();
+
+    const shareUrl =
+      params.get("url") || process.env.ONEDRIVE_SHARE_URL;
+    if (!shareUrl) {
+      return NextResponse.json(
+        { success: false, error: "No sharing URL provided." },
+        { status: 400 }
+      );
+    }
+    try {
+      const sheets = await listWorksheetsViaShareUrl(shareUrl);
+      return NextResponse.json({ success: true, data: sheets });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      console.error("[OneDrive API] share-graph-worksheets error:", message);
+      return NextResponse.json(
+        { success: false, error: message },
+        { status: 500 }
+      );
+    }
+  }
+
+  // ── Fallback: download .xlsx from sharing URL (no auth needed) ──────────
 
   if (action === "share-read") {
     const shareUrl =
@@ -184,32 +250,17 @@ export async function GET(request: NextRequest) {
  * POST /api/onedrive/sheets
  *
  * Body:
- *   { action: "write", fileId?, worksheet?, range: "A1:D5", values: [[...], [...]] }
- *   fileId supports composite "driveId:itemId" for shared files
+ *   { action: "write", fileId?, worksheet?, range, values }
+ *   { action: "share-graph-write", url?, worksheet?, range, values }
  */
 export async function POST(request: NextRequest) {
   if (!isAuthenticated()) return unauthorized();
 
   try {
     const body = await request.json();
-    const { action, range, values } = body;
-    const fileId = body.fileId || process.env.ONEDRIVE_FILE_ID;
+    const { action = "write", range, values } = body;
     const worksheet =
       body.worksheet || process.env.ONEDRIVE_WORKSHEET_NAME || "Sheet1";
-
-    if (action !== "write") {
-      return NextResponse.json(
-        { success: false, error: `Unknown action: ${action}. Use "write".` },
-        { status: 400 }
-      );
-    }
-
-    if (!fileId) {
-      return NextResponse.json(
-        { success: false, error: "No file ID provided." },
-        { status: 400 }
-      );
-    }
 
     if (!range || !values || !Array.isArray(values)) {
       return NextResponse.json(
@@ -221,8 +272,34 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const result = await writeSheetData(fileId, worksheet, range, values);
-    return NextResponse.json({ success: true, data: result });
+    if (action === "share-graph-write") {
+      const shareUrl = body.url || process.env.ONEDRIVE_SHARE_URL;
+      if (!shareUrl) {
+        return NextResponse.json(
+          { success: false, error: "No sharing URL provided." },
+          { status: 400 }
+        );
+      }
+      const result = await writeSheetViaShareUrl(shareUrl, worksheet, range, values);
+      return NextResponse.json({ success: true, data: result });
+    }
+
+    if (action === "write") {
+      const fileId = body.fileId || process.env.ONEDRIVE_FILE_ID;
+      if (!fileId) {
+        return NextResponse.json(
+          { success: false, error: "No file ID provided." },
+          { status: 400 }
+        );
+      }
+      const result = await writeSheetData(fileId, worksheet, range, values);
+      return NextResponse.json({ success: true, data: result });
+    }
+
+    return NextResponse.json(
+      { success: false, error: `Unknown action: ${action}. Use "write" or "share-graph-write".` },
+      { status: 400 }
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     console.error("[OneDrive API] POST error:", message);

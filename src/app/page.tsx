@@ -41,48 +41,47 @@ export default function Home() {
                 <li className="flex gap-2">
                   <span className="text-zinc-500 font-mono">1.</span>
                   <span>
-                    In{" "}
-                    <span className="text-blue-400">Azure Portal</span> &gt; App
-                    Registration &gt; Authentication, set supported accounts to{" "}
-                    <span className="text-amber-400">
-                      &quot;Personal Microsoft accounts&quot;
-                    </span>
-                    . Set{" "}
-                    <code className="text-xs bg-zinc-900 px-1.5 py-0.5 rounded text-zinc-300">
-                      AZURE_TENANT_ID=consumers
-                    </code>
-                  </span>
-                </li>
-                <li className="flex gap-2">
-                  <span className="text-zinc-500 font-mono">2.</span>
-                  <span>
                     Click{" "}
                     <span className="text-blue-400">
                       &quot;Connect to Microsoft OneDrive&quot;
                     </span>{" "}
                     and sign in with your{" "}
-                    <span className="text-amber-400">personal Microsoft account</span>{" "}
-                    (outlook.com / hotmail.com / live.com)
+                    <span className="text-amber-400">personal Microsoft account</span>
+                  </span>
+                </li>
+                <li className="flex gap-2">
+                  <span className="text-zinc-500 font-mono">2.</span>
+                  <span>
+                    Ask your colleague to{" "}
+                    <span className="text-amber-400">share the Excel file</span>{" "}
+                    and copy the sharing URL (e.g.{" "}
+                    <code className="text-xs bg-zinc-900 px-1 rounded text-zinc-500">
+                      https://1drv.ms/x/...
+                    </code>
+                    )
                   </span>
                 </li>
                 <li className="flex gap-2">
                   <span className="text-zinc-500 font-mono">3.</span>
                   <span>
-                    Have your colleague share the Excel file with your personal
-                    email. Click{" "}
-                    <span className="text-amber-400">&quot;Shared With Me&quot;</span>{" "}
-                    to find it and copy the composite ID
+                    Set{" "}
+                    <code className="text-xs bg-zinc-900 px-1.5 py-0.5 rounded text-zinc-300">
+                      ONEDRIVE_SHARE_URL
+                    </code>{" "}
+                    and{" "}
+                    <code className="text-xs bg-zinc-900 px-1.5 py-0.5 rounded text-zinc-300">
+                      ONEDRIVE_WORKSHEET_NAME
+                    </code>{" "}
+                    in Vercel env vars
                   </span>
                 </li>
                 <li className="flex gap-2">
                   <span className="text-zinc-500 font-mono">4.</span>
                   <span>
-                    Set{" "}
-                    <code className="text-xs bg-zinc-900 px-1.5 py-0.5 rounded text-zinc-300">
-                      ONEDRIVE_FILE_ID
-                    </code>{" "}
-                    with the composite ID — dynamic read/write to the live
-                    spreadsheet, just like Google Sheets
+                    Use{" "}
+                    <span className="text-blue-400">&quot;Live (Share URL)&quot;</span>{" "}
+                    mode — dynamic read/write via Graph API, just like Google
+                    Sheets
                   </span>
                 </li>
               </ol>
