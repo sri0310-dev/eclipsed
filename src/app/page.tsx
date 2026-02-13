@@ -41,42 +41,48 @@ export default function Home() {
                 <li className="flex gap-2">
                   <span className="text-zinc-500 font-mono">1.</span>
                   <span>
-                    Ask your colleague to click{" "}
-                    <span className="text-amber-400">&quot;Copy link&quot;</span>{" "}
-                    on the Excel file with{" "}
-                    <span className="text-amber-400">&quot;Anyone with the link&quot;</span>{" "}
-                    access (like a public Google Sheet link)
+                    In{" "}
+                    <span className="text-blue-400">Azure Portal</span> &gt; App
+                    Registration &gt; Authentication, set supported accounts to{" "}
+                    <span className="text-amber-400">
+                      &quot;Personal Microsoft accounts&quot;
+                    </span>
+                    . Set{" "}
+                    <code className="text-xs bg-zinc-900 px-1.5 py-0.5 rounded text-zinc-300">
+                      AZURE_TENANT_ID=consumers
+                    </code>
                   </span>
                 </li>
                 <li className="flex gap-2">
                   <span className="text-zinc-500 font-mono">2.</span>
                   <span>
-                    Set{" "}
-                    <code className="text-xs bg-zinc-900 px-1.5 py-0.5 rounded text-zinc-300">
-                      ONEDRIVE_SHARE_URL
-                    </code>{" "}
-                    in Vercel env vars with the sharing link, and{" "}
-                    <code className="text-xs bg-zinc-900 px-1.5 py-0.5 rounded text-zinc-300">
-                      ONEDRIVE_WORKSHEET_NAME
-                    </code>{" "}
-                    with the tab name (e.g. &quot;Working&quot;)
+                    Click{" "}
+                    <span className="text-blue-400">
+                      &quot;Connect to Microsoft OneDrive&quot;
+                    </span>{" "}
+                    and sign in with your{" "}
+                    <span className="text-amber-400">personal Microsoft account</span>{" "}
+                    (outlook.com / hotmail.com / live.com)
                   </span>
                 </li>
                 <li className="flex gap-2">
                   <span className="text-zinc-500 font-mono">3.</span>
                   <span>
-                    Use the{" "}
-                    <span className="text-amber-400">&quot;Sharing Link&quot;</span>{" "}
-                    mode in the reader below — paste the link or leave empty to
-                    use the env var. No Microsoft sign-in or SPO license needed!
+                    Have your colleague share the Excel file with your personal
+                    email. Click{" "}
+                    <span className="text-amber-400">&quot;Shared With Me&quot;</span>{" "}
+                    to find it and copy the composite ID
                   </span>
                 </li>
                 <li className="flex gap-2">
                   <span className="text-zinc-500 font-mono">4.</span>
                   <span>
-                    The app downloads the .xlsx directly and parses it server-side.
-                    Your colleague keeps editing as normal — the app always reads
-                    the latest version.
+                    Set{" "}
+                    <code className="text-xs bg-zinc-900 px-1.5 py-0.5 rounded text-zinc-300">
+                      ONEDRIVE_FILE_ID
+                    </code>{" "}
+                    with the composite ID — dynamic read/write to the live
+                    spreadsheet, just like Google Sheets
                   </span>
                 </li>
               </ol>

@@ -53,7 +53,8 @@ function itemPath(fileId: string): string {
 
 export function getAuthUrl(host?: string): string {
   const redirectUri = getRedirectUri(host);
-  return `https://login.microsoftonline.com/${process.env.AZURE_TENANT_ID}/oauth2/v2.0/authorize?client_id=${process.env.AZURE_CLIENT_ID}&response_type=code&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent(GRAPH_SCOPES.join(" "))}&response_mode=query`;
+  const tenant = process.env.AZURE_TENANT_ID || "common";
+  return `https://login.microsoftonline.com/${tenant}/oauth2/v2.0/authorize?client_id=${process.env.AZURE_CLIENT_ID}&response_type=code&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent(GRAPH_SCOPES.join(" "))}&response_mode=query`;
 }
 
 export async function exchangeCodeForToken(code: string, host?: string): Promise<void> {

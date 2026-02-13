@@ -9,7 +9,7 @@ export default function SpreadsheetViewer() {
   const [error, setError] = useState<string | null>(null);
   const [shareUrl, setShareUrl] = useState("");
   const [worksheet, setWorksheet] = useState("");
-  const [mode, setMode] = useState<"share-link" | "graph-api">("share-link");
+  const [mode, setMode] = useState<"share-link" | "graph-api">("graph-api");
 
   // Graph API mode fields
   const [fileId, setFileId] = useState("");
