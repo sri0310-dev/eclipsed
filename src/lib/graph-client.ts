@@ -59,6 +59,30 @@ export async function exchangeCodeForToken(code: string, host?: string): Promise
   }
 }
 
+// ─── Sharing Link Resolution ───────────────────────────────────────────────
+
+/**
+ * Resolve a OneDrive/SharePoint sharing URL into a drive item.
+ * Uses the /shares/{encodedUrl}/driveItem Graph API endpoint.
+ * See: https://learn.microsoft.com/en-us/graph/api/shares-get
+ */
+export async function resolveShareLink(shareUrl: string): Promise<OneDriveFile> {
+  const token = await getAccessToken();
+  const client = getAuthenticatedClient(token);
+
+  // Encode the sharing URL for the Graph API
+  // Base64-encode, then make URL-safe, then prepend "u!"
+  const base64 = Buffer.from(shareUrl, "utf-8").toString("base64");
+  const encoded = "u!" + base64.replace(/=+$/, "").replace(/\//g, "_").replace(/\+/g, "-");
+
+  const item = await client
+    .api(`/shares/${encoded}/driveItem`)
+    .select("id,name,webUrl,size,lastModifiedDateTime,lastModifiedBy")
+    .get();
+
+  return item as OneDriveFile;
+}
+
 // ─── File Discovery ────────────────────────────────────────────────────────
 
 export async function searchFiles(

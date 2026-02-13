@@ -3,6 +3,15 @@
 import { useState } from "react";
 import type { OneDriveFile } from "@/types/onedrive";
 
+function isShareLink(input: string): boolean {
+  return (
+    input.startsWith("https://onedrive.live.com/") ||
+    input.startsWith("https://1drv.ms/") ||
+    input.includes("sharepoint.com/") ||
+    input.includes("-my.sharepoint.com/")
+  );
+}
+
 export default function FileSearch() {
   const [query, setQuery] = useState("");
   const [files, setFiles] = useState<OneDriveFile[]>([]);
@@ -17,9 +26,14 @@ export default function FileSearch() {
     setSearched(true);
 
     try {
-      const res = await fetch(
-        `/api/onedrive/sheets?action=search&filename=${encodeURIComponent(query)}`
-      );
+      let url: string;
+      if (isShareLink(query.trim())) {
+        url = `/api/onedrive/sheets?action=resolve&url=${encodeURIComponent(query.trim())}`;
+      } else {
+        url = `/api/onedrive/sheets?action=search&filename=${encodeURIComponent(query)}`;
+      }
+
+      const res = await fetch(url);
       const data = await res.json();
       if (!data.success) {
         setError(data.error);
@@ -45,7 +59,7 @@ export default function FileSearch() {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && search()}
-          placeholder="Search for file name..."
+          placeholder="Search by name or paste a OneDrive sharing link..."
           className="flex-1 px-3 py-2 bg-zinc-900 border border-zinc-600 rounded-lg text-sm text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-blue-500"
         />
         <button
@@ -53,7 +67,7 @@ export default function FileSearch() {
           disabled={loading}
           className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-zinc-600 text-white text-sm font-medium rounded-lg transition-colors"
         >
-          {loading ? "Searching..." : "Search"}
+          {loading ? (isShareLink(query) ? "Resolving..." : "Searching...") : isShareLink(query) ? "Resolve" : "Search"}
         </button>
       </div>
 

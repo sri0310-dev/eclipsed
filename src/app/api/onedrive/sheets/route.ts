@@ -4,6 +4,7 @@ import {
   writeSheetData,
   listWorksheets,
   searchFiles,
+  resolveShareLink,
 } from "@/lib/graph-client";
 import { isAuthenticated } from "@/lib/token-store";
 import type { ApiResponse, SheetDataResponse } from "@/types/onedrive";
@@ -90,6 +91,18 @@ export async function GET(request: NextRequest) {
         }
         const files = await searchFiles(filename);
         return NextResponse.json({ success: true, data: files });
+      }
+
+      case "resolve": {
+        const url = params.get("url");
+        if (!url) {
+          return NextResponse.json(
+            { success: false, error: "url query param is required for resolve" },
+            { status: 400 }
+          );
+        }
+        const file = await resolveShareLink(url);
+        return NextResponse.json({ success: true, data: [file] });
       }
 
       default:
