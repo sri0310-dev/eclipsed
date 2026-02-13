@@ -41,46 +41,35 @@ export default function Home() {
                 <li className="flex gap-2">
                   <span className="text-zinc-500 font-mono">1.</span>
                   <span>
-                    Register an app in{" "}
-                    <span className="text-blue-400">Azure Portal</span> &gt; App
-                    Registrations. Set redirect URI to{" "}
-                    <code className="text-xs bg-zinc-900 px-1.5 py-0.5 rounded text-zinc-300">
-                      http://localhost:3000/api/onedrive/auth/callback
-                    </code>
+                    Ask your colleague to{" "}
+                    <span className="text-amber-400">share the master Excel file</span>{" "}
+                    with your Microsoft account (like sharing a Google Sheet)
                   </span>
                 </li>
                 <li className="flex gap-2">
                   <span className="text-zinc-500 font-mono">2.</span>
                   <span>
-                    Copy Client ID, Tenant ID, and create a Client Secret.
-                    Add them to{" "}
-                    <code className="text-xs bg-zinc-900 px-1.5 py-0.5 rounded text-zinc-300">
-                      .env.local
-                    </code>
+                    Click &quot;Connect to Microsoft OneDrive&quot; below and sign in
+                    with your Microsoft account
                   </span>
                 </li>
                 <li className="flex gap-2">
                   <span className="text-zinc-500 font-mono">3.</span>
                   <span>
-                    Grant API permissions:{" "}
-                    <code className="text-xs bg-zinc-900 px-1.5 py-0.5 rounded text-zinc-300">
-                      Files.ReadWrite
-                    </code>{" "}
-                    and{" "}
-                    <code className="text-xs bg-zinc-900 px-1.5 py-0.5 rounded text-zinc-300">
-                      User.Read
-                    </code>{" "}
-                    (Delegated)
+                    Click{" "}
+                    <span className="text-amber-400">&quot;Shared With Me&quot;</span>{" "}
+                    to find the shared Excel file and copy its composite ID
                   </span>
                 </li>
                 <li className="flex gap-2">
                   <span className="text-zinc-500 font-mono">4.</span>
                   <span>
-                    Click &quot;Connect to Microsoft OneDrive&quot; below, sign in, then
-                    search for your master Excel file and copy its ID to{" "}
+                    Set{" "}
                     <code className="text-xs bg-zinc-900 px-1.5 py-0.5 rounded text-zinc-300">
-                      .env.local
-                    </code>
+                      ONEDRIVE_FILE_ID
+                    </code>{" "}
+                    in Vercel env vars with the composite ID — the app reads/writes
+                    directly to your colleague&apos;s file
                   </span>
                 </li>
               </ol>

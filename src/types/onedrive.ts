@@ -32,6 +32,18 @@ export interface OneDriveFile {
       displayName: string;
     };
   };
+  /** For shared files: the composite "driveId:itemId" reference */
+  compositeId?: string;
+  /** For shared files: the remote drive ID */
+  remoteItem?: {
+    id: string;
+    parentReference?: {
+      driveId: string;
+    };
+  };
+  parentReference?: {
+    driveId: string;
+  };
 }
 
 export interface SpreadsheetRow {

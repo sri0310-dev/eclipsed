@@ -9,7 +9,14 @@ import type {
 
 /**
  * Core Microsoft Graph client for OneDrive/Excel operations.
- * Handles token acquisition and provides methods for spreadsheet I/O.
+ * Supports both owned files and files shared by others.
+ *
+ * File ID convention:
+ *   - Plain ID:       "abc123"          → /me/drive/items/abc123
+ *   - Composite ID:   "driveId:itemId"  → /drives/driveId/items/itemId
+ *
+ * Shared files from another user's OneDrive use the composite format
+ * so the Graph API routes to the correct drive.
  */
 
 function getAuthenticatedClient(accessToken: string): Client {
@@ -28,6 +35,18 @@ async function getAccessToken(): Promise<string> {
   throw new Error(
     "No valid access token. User must authenticate via /api/onedrive/auth first."
   );
+}
+
+/**
+ * Build the base path for a file's workbook API.
+ * Handles both owned files (/me/drive/items/...) and shared files (/drives/.../items/...).
+ */
+function itemPath(fileId: string): string {
+  if (fileId.includes(":")) {
+    const [driveId, itemId] = fileId.split(":", 2);
+    return `/drives/${driveId}/items/${itemId}`;
+  }
+  return `/me/drive/items/${fileId}`;
 }
 
 // ─── Authentication ────────────────────────────────────────────────────────
@@ -59,28 +78,51 @@ export async function exchangeCodeForToken(code: string, host?: string): Promise
   }
 }
 
-// ─── Sharing Link Resolution ───────────────────────────────────────────────
+// ─── Shared With Me ────────────────────────────────────────────────────────
 
 /**
- * Resolve a OneDrive/SharePoint sharing URL into a drive item.
- * Uses the /shares/{encodedUrl}/driveItem Graph API endpoint.
- * See: https://learn.microsoft.com/en-us/graph/api/shares-get
+ * List Excel files that have been shared with the authenticated user.
+ * This is the OneDrive equivalent of viewing shared Google Sheets.
+ * Returns files with composite IDs (driveId:itemId) for direct use.
  */
-export async function resolveShareLink(shareUrl: string): Promise<OneDriveFile> {
+export async function listSharedWithMe(): Promise<OneDriveFile[]> {
   const token = await getAccessToken();
   const client = getAuthenticatedClient(token);
 
-  // Encode the sharing URL for the Graph API
-  // Base64-encode, then make URL-safe, then prepend "u!"
-  const base64 = Buffer.from(shareUrl, "utf-8").toString("base64");
-  const encoded = "u!" + base64.replace(/=+$/, "").replace(/\//g, "_").replace(/\+/g, "-");
-
-  const item = await client
-    .api(`/shares/${encoded}/driveItem`)
-    .select("id,name,webUrl,size,lastModifiedDateTime,lastModifiedBy")
+  const result = await client
+    .api("/me/drive/sharedWithMe")
     .get();
 
-  return item as OneDriveFile;
+  // Filter to Excel files and build composite IDs
+  const files: OneDriveFile[] = [];
+  for (const item of result.value || []) {
+    const name: string = item.name || "";
+    const isExcel =
+      name.endsWith(".xlsx") ||
+      name.endsWith(".xls") ||
+      name.endsWith(".xlsm");
+    if (!isExcel) continue;
+
+    // Shared items have remoteItem with the actual driveId + itemId
+    const remoteItem = item.remoteItem;
+    const driveId = remoteItem?.parentReference?.driveId;
+    const itemId = remoteItem?.id || item.id;
+
+    files.push({
+      id: item.id,
+      name: item.name,
+      webUrl: item.webUrl || remoteItem?.webUrl || "",
+      size: remoteItem?.size || item.size || 0,
+      lastModifiedDateTime:
+        remoteItem?.lastModifiedDateTime || item.lastModifiedDateTime || "",
+      lastModifiedBy: remoteItem?.lastModifiedBy || item.lastModifiedBy,
+      compositeId: driveId ? `${driveId}:${itemId}` : item.id,
+      remoteItem,
+      parentReference: item.parentReference,
+    });
+  }
+
+  return files;
 }
 
 // ─── File Discovery ────────────────────────────────────────────────────────
@@ -110,7 +152,7 @@ export async function readSheetData(
   const token = await getAccessToken();
   const client = getAuthenticatedClient(token);
 
-  const basePath = `/me/drive/items/${fileId}/workbook/worksheets/${worksheet}`;
+  const basePath = `${itemPath(fileId)}/workbook/worksheets/${worksheet}`;
   const apiPath = range
     ? `${basePath}/range(address='${range}')`
     : `${basePath}/usedRange`;
@@ -145,7 +187,7 @@ export async function readCellValue(
 
   const result = await client
     .api(
-      `/me/drive/items/${fileId}/workbook/worksheets/${worksheet}/range(address='${cellAddress}')`
+      `${itemPath(fileId)}/workbook/worksheets/${worksheet}/range(address='${cellAddress}')`
     )
     .get();
 
@@ -165,7 +207,7 @@ export async function writeSheetData(
 
   const result = await client
     .api(
-      `/me/drive/items/${fileId}/workbook/worksheets/${worksheet}/range(address='${range}')`
+      `${itemPath(fileId)}/workbook/worksheets/${worksheet}/range(address='${range}')`
     )
     .patch({ values });
 
@@ -183,7 +225,7 @@ export async function appendRow(
 
   await client
     .api(
-      `/me/drive/items/${fileId}/workbook/worksheets/${worksheet}/tables/${tableNameOrRange}/rows`
+      `${itemPath(fileId)}/workbook/worksheets/${worksheet}/tables/${tableNameOrRange}/rows`
     )
     .post({ values: [values] });
 }
@@ -197,7 +239,7 @@ export async function listWorksheets(
   const client = getAuthenticatedClient(token);
 
   const result = await client
-    .api(`/me/drive/items/${fileId}/workbook/worksheets`)
+    .api(`${itemPath(fileId)}/workbook/worksheets`)
     .get();
 
   return result.value.map(

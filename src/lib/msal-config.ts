@@ -3,7 +3,7 @@ import { ConfidentialClientApplication, Configuration, LogLevel } from "@azure/m
 const msalConfig: Configuration = {
   auth: {
     clientId: process.env.AZURE_CLIENT_ID!,
-    authority: `https://login.microsoftonline.com/${process.env.AZURE_TENANT_ID}`,
+    authority: `https://login.microsoftonline.com/${process.env.AZURE_TENANT_ID || "consumers"}`,
     clientSecret: process.env.AZURE_CLIENT_SECRET!,
   },
   system: {
@@ -28,8 +28,9 @@ export function getMsalClient(): ConfidentialClientApplication {
 }
 
 // Scopes needed for OneDrive/Excel operations
+// Files.ReadWrite.All is required to access files shared by others
 export const GRAPH_SCOPES = [
-  "https://graph.microsoft.com/Files.ReadWrite",
+  "https://graph.microsoft.com/Files.ReadWrite.All",
   "https://graph.microsoft.com/User.Read",
 ];
 

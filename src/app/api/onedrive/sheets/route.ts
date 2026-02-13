@@ -4,7 +4,7 @@ import {
   writeSheetData,
   listWorksheets,
   searchFiles,
-  resolveShareLink,
+  listSharedWithMe,
 } from "@/lib/graph-client";
 import { isAuthenticated } from "@/lib/token-store";
 import type { ApiResponse, SheetDataResponse } from "@/types/onedrive";
@@ -20,8 +20,8 @@ function unauthorized(): NextResponse<ApiResponse> {
  * GET /api/onedrive/sheets
  *
  * Query params:
- *   action: "read" | "worksheets" | "search" | "status"
- *   fileId: OneDrive file ID (or uses env default)
+ *   action: "read" | "worksheets" | "search" | "shared" | "status"
+ *   fileId: OneDrive file ID, or composite "driveId:itemId" for shared files
  *   worksheet: worksheet name (or uses env default)
  *   range: cell range like "A1:Z100" (optional, defaults to used range)
  *   filename: search query for file discovery
@@ -93,16 +93,9 @@ export async function GET(request: NextRequest) {
         return NextResponse.json({ success: true, data: files });
       }
 
-      case "resolve": {
-        const url = params.get("url");
-        if (!url) {
-          return NextResponse.json(
-            { success: false, error: "url query param is required for resolve" },
-            { status: 400 }
-          );
-        }
-        const file = await resolveShareLink(url);
-        return NextResponse.json({ success: true, data: [file] });
+      case "shared": {
+        const files = await listSharedWithMe();
+        return NextResponse.json({ success: true, data: files });
       }
 
       default:
@@ -126,6 +119,7 @@ export async function GET(request: NextRequest) {
  *
  * Body:
  *   { action: "write", fileId?, worksheet?, range: "A1:D5", values: [[...], [...]] }
+ *   fileId supports composite "driveId:itemId" for shared files
  */
 export async function POST(request: NextRequest) {
   if (!isAuthenticated()) return unauthorized();
