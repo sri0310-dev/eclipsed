@@ -1,5 +1,5 @@
-import AppShell from "@/components/AppShell";
+import ControlTower from "@/components/ControlTower";
 
 export default function Home() {
-  return <AppShell />;
+  return <ControlTower />;
 }
