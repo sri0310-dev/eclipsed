@@ -14,15 +14,15 @@ export default function WorksheetManager() {
   const [error, setError] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
   const [creating, setCreating] = useState(false);
-  const [shareUrl, setShareUrl] = useState("");
+  const [fileId, setFileId] = useState("");
   const [message, setMessage] = useState<string | null>(null);
 
   const fetchWorksheets = async () => {
     setLoading(true);
     setError(null);
     try {
-      const params = new URLSearchParams({ action: "share-graph-worksheets" });
-      if (shareUrl) params.set("url", shareUrl);
+      const params = new URLSearchParams({ action: "worksheets" });
+      if (fileId) params.set("fileId", fileId);
 
       const res = await fetch(`/api/onedrive/sheets?${params}`);
       const data = await res.json();
@@ -46,10 +46,10 @@ export default function WorksheetManager() {
     setMessage(null);
     try {
       const body: Record<string, string> = {
-        action: "share-graph-create-worksheet",
+        action: "create-worksheet",
         name: newName.trim(),
       };
-      if (shareUrl) body.url = shareUrl;
+      if (fileId) body.fileId = fileId;
 
       const res = await fetch("/api/onedrive/sheets", {
         method: "POST",
@@ -63,7 +63,6 @@ export default function WorksheetManager() {
       } else {
         setMessage(`Created worksheet "${data.data.name}"`);
         setNewName("");
-        // Refresh list
         fetchWorksheets();
       }
     } catch {
@@ -81,13 +80,13 @@ export default function WorksheetManager() {
 
       <div className="mb-4">
         <label className="block text-xs text-zinc-400 mb-1">
-          OneDrive Sharing URL
+          File ID (composite ID from Shared With Me)
         </label>
         <input
           type="text"
-          value={shareUrl}
-          onChange={(e) => setShareUrl(e.target.value)}
-          placeholder="Uses ONEDRIVE_SHARE_URL env var if empty"
+          value={fileId}
+          onChange={(e) => setFileId(e.target.value)}
+          placeholder="Uses ONEDRIVE_FILE_ID env var if empty"
           className="w-full px-3 py-2 bg-zinc-900 border border-zinc-600 rounded-lg text-sm text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-blue-500"
         />
       </div>
@@ -105,7 +104,8 @@ export default function WorksheetManager() {
       {worksheets.length > 0 && (
         <div className="mb-4">
           <div className="text-xs text-zinc-400 mb-2">
-            {worksheets.length} worksheet{worksheets.length !== 1 ? "s" : ""} found
+            {worksheets.length} worksheet{worksheets.length !== 1 ? "s" : ""}{" "}
+            found
           </div>
           <div className="flex flex-wrap gap-2">
             {worksheets.map((ws) => (
