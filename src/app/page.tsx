@@ -41,35 +41,42 @@ export default function Home() {
                 <li className="flex gap-2">
                   <span className="text-zinc-500 font-mono">1.</span>
                   <span>
-                    Ask your colleague to{" "}
-                    <span className="text-amber-400">share the master Excel file</span>{" "}
-                    with your Microsoft account (like sharing a Google Sheet)
+                    Ask your colleague to click{" "}
+                    <span className="text-amber-400">&quot;Copy link&quot;</span>{" "}
+                    on the Excel file with{" "}
+                    <span className="text-amber-400">&quot;Anyone with the link&quot;</span>{" "}
+                    access (like a public Google Sheet link)
                   </span>
                 </li>
                 <li className="flex gap-2">
                   <span className="text-zinc-500 font-mono">2.</span>
                   <span>
-                    Click &quot;Connect to Microsoft OneDrive&quot; below and sign in
-                    with your Microsoft account
+                    Set{" "}
+                    <code className="text-xs bg-zinc-900 px-1.5 py-0.5 rounded text-zinc-300">
+                      ONEDRIVE_SHARE_URL
+                    </code>{" "}
+                    in Vercel env vars with the sharing link, and{" "}
+                    <code className="text-xs bg-zinc-900 px-1.5 py-0.5 rounded text-zinc-300">
+                      ONEDRIVE_WORKSHEET_NAME
+                    </code>{" "}
+                    with the tab name (e.g. &quot;Working&quot;)
                   </span>
                 </li>
                 <li className="flex gap-2">
                   <span className="text-zinc-500 font-mono">3.</span>
                   <span>
-                    Click{" "}
-                    <span className="text-amber-400">&quot;Shared With Me&quot;</span>{" "}
-                    to find the shared Excel file and copy its composite ID
+                    Use the{" "}
+                    <span className="text-amber-400">&quot;Sharing Link&quot;</span>{" "}
+                    mode in the reader below — paste the link or leave empty to
+                    use the env var. No Microsoft sign-in or SPO license needed!
                   </span>
                 </li>
                 <li className="flex gap-2">
                   <span className="text-zinc-500 font-mono">4.</span>
                   <span>
-                    Set{" "}
-                    <code className="text-xs bg-zinc-900 px-1.5 py-0.5 rounded text-zinc-300">
-                      ONEDRIVE_FILE_ID
-                    </code>{" "}
-                    in Vercel env vars with the composite ID — the app reads/writes
-                    directly to your colleague&apos;s file
+                    The app downloads the .xlsx directly and parses it server-side.
+                    Your colleague keeps editing as normal — the app always reads
+                    the latest version.
                   </span>
                 </li>
               </ol>
