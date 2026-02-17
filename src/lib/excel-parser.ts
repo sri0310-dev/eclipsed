@@ -165,76 +165,215 @@ function cleanForDb(val: string | number | boolean | null): string | number | nu
   return s;
 }
 
-// ─── Download & Parse ────────────────────────────────────────────
+// ─── OneDrive Download (Badger Token + Redeem) ──────────────────
+//
+// Microsoft changed their sharing infrastructure in 2024-2025.
+// The old base64 shares API (api.onedrive.com/v1.0/shares/u!...)
+// no longer works for the new URL format (/x/c/{cid}/{resid}).
+//
+// The working approach for new-format personal OneDrive links:
+// 1. Follow the 1drv.ms redirect to get the resolved URL with ?redeem= param
+// 2. Get a "Badger" token from api-badgerp.svc.ms (no OAuth needed)
+// 3. Use the Badger token to query the OneDrive API for @content.downloadUrl
+// 4. Download the file from that URL
 
-/**
- * Resolve a OneDrive sharing URL to a direct download URL.
- *
- * For 1drv.ms short links: follow the redirect chain to get the real
- * onedrive.live.com URL, then convert to download URL.
- *
- * For onedrive.live.com: swap /edit.aspx for /download.aspx.
- *
- * The Microsoft Graph API "encode sharing URL" approach also works:
- * encode the sharing URL as base64, prefix with "u!", and call
- * /shares/{encoded}/driveItem/content — but that requires auth.
- *
- * This approach uses the public download mechanism instead.
- */
-async function resolveToDownloadUrl(shareUrl: string): Promise<string> {
-  const url = new URL(shareUrl);
+const BADGER_TOKEN_URL = "https://api-badgerp.svc.ms/v1.0/token";
+const BADGER_APP_UUID = "5cbed6ac-a083-4e14-b191-b4ba07653de2";
+const BADGER_APP_ID = "1141147648";
+const PERSONAL_API = "https://my.microsoftpersonalcontent.com/_api/v2.0/shares";
+const BROWSER_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
-  // For 1drv.ms short links, first resolve the redirect to get the real URL
-  if (url.hostname === "1drv.ms") {
-    // Follow redirect manually to get the real OneDrive URL
-    const redirectRes = await fetch(shareUrl, {
-      redirect: "manual",
-      headers: { "User-Agent": "HectarControlTower/2.0" },
-    });
+// Simple in-memory Badger token cache (valid ~1 week)
+let cachedBadgerToken: { token: string; expiresAt: number } | null = null;
 
-    const location = redirectRes.headers.get("location");
-    if (location) {
-      // Now convert the resolved URL to a download URL
-      return convertToDownloadUrl(location);
-    }
-
-    // If no redirect, try the base64 encoding approach
-    // OneDrive supports: https://api.onedrive.com/v1.0/shares/u!{base64}/root/content
-    const base64 = Buffer.from(shareUrl)
-      .toString("base64")
-      .replace(/\//g, "_")
-      .replace(/\+/g, "-")
-      .replace(/=+$/, "");
-    return `https://api.onedrive.com/v1.0/shares/u!${base64}/root/content`;
+async function getBadgerToken(): Promise<string> {
+  if (cachedBadgerToken && Date.now() < cachedBadgerToken.expiresAt) {
+    return cachedBadgerToken.token;
   }
 
-  return convertToDownloadUrl(shareUrl);
+  console.log("[download] Requesting new Badger token...");
+  const res = await fetch(BADGER_TOKEN_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      AppId: BADGER_APP_ID,
+      "User-Agent": BROWSER_UA,
+    },
+    body: JSON.stringify({ appId: BADGER_APP_UUID }),
+  });
+
+  if (!res.ok) {
+    throw new Error(`Badger token request failed: HTTP ${res.status}`);
+  }
+
+  const data = await res.json();
+  // Cache for 6 days (token is valid for ~1 week)
+  cachedBadgerToken = {
+    token: data.token,
+    expiresAt: Date.now() + 6 * 24 * 60 * 60 * 1000,
+  };
+  return data.token;
 }
 
-function convertToDownloadUrl(shareUrl: string): string {
-  const url = new URL(shareUrl);
+/**
+ * Follow the 1drv.ms redirect chain to get the resolved URL
+ * which contains the ?redeem= parameter needed for the API.
+ *
+ * Tries two approaches:
+ * 1. Follow all redirects and check final URL for ?redeem= param
+ * 2. If no redeem in URL, check intermediate redirect (manual mode)
+ */
+async function resolveShareLink(shareUrl: string): Promise<string> {
+  // Approach 1: Follow all redirects, check final URL
+  const res = await fetch(shareUrl, {
+    redirect: "follow",
+    headers: { "User-Agent": BROWSER_UA },
+  });
+  const finalUrl = res.url;
 
-  if (url.hostname.includes("onedrive.live.com")) {
-    url.pathname = url.pathname
-      .replace(/\/edit\.aspx/i, "/download.aspx")
-      .replace(/\/embed/i, "/download");
-    url.searchParams.set("download", "1");
-    return url.toString();
+  // Check if the redeem param is in the final URL
+  if (finalUrl.includes("redeem=")) {
+    return finalUrl;
   }
 
-  if (url.hostname.includes("sharepoint.com")) {
-    url.searchParams.set("download", "1");
-    return url.toString();
+  // Approach 2: Check intermediate redirects (manual mode)
+  // Sometimes the redeem param appears in the first redirect
+  const manualRes = await fetch(shareUrl, {
+    redirect: "manual",
+    headers: { "User-Agent": BROWSER_UA },
+  });
+  const location = manualRes.headers.get("location");
+  if (location && location.includes("redeem=")) {
+    return location;
   }
 
-  // Fallback: try the public OneDrive shares API
-  // This works for any valid sharing URL without authentication
-  const base64 = Buffer.from(shareUrl)
-    .toString("base64")
-    .replace(/\//g, "_")
-    .replace(/\+/g, "-")
-    .replace(/=+$/, "");
-  return `https://api.onedrive.com/v1.0/shares/u!${base64}/root/content`;
+  // If the HTML body contains the redeem value, try to extract it
+  const html = await res.text().catch(() => "");
+  const redeemMatch = html.match(/[?&]redeem=([^&"'\s]+)/);
+  if (redeemMatch) {
+    // Reconstruct the URL with the redeem parameter
+    const urlObj = new URL(finalUrl);
+    urlObj.searchParams.set("redeem", decodeURIComponent(redeemMatch[1]));
+    return urlObj.toString();
+  }
+
+  // Return whatever we have — the caller will handle the missing redeem
+  console.log("[download] No redeem found. Final URL:", finalUrl.substring(0, 200));
+  console.log("[download] Redirect location:", location?.substring(0, 200) || "none");
+  return finalUrl;
+}
+
+/**
+ * Download a file using the Badger Token + Redeem method.
+ * Works for new OneDrive personal links (/x/c/{cid}/{resid}).
+ */
+async function downloadViaBadger(shareUrl: string): Promise<ArrayBuffer> {
+  // Step 1: Resolve the sharing URL to get the redeem parameter
+  console.log("[download] Resolving share link...");
+  const resolvedUrl = await resolveShareLink(shareUrl);
+  console.log("[download] Resolved to:", resolvedUrl.substring(0, 120) + "...");
+
+  const url = new URL(resolvedUrl);
+  const redeem = url.searchParams.get("redeem");
+
+  if (!redeem) {
+    throw new Error(
+      `No 'redeem' parameter found in resolved URL. ` +
+        `This may be an old-format link. Resolved: ${resolvedUrl.substring(0, 200)}`
+    );
+  }
+
+  // Step 2: Get Badger token (cached)
+  const token = await getBadgerToken();
+
+  // Step 3: Query the OneDrive API for file metadata
+  // The redeem value is already URL-safe base64 — use it directly
+  const apiUrl = `${PERSONAL_API}/u!${redeem}/driveitem`;
+  console.log("[download] Querying OneDrive API for download URL...");
+
+  const metaRes = await fetch(apiUrl, {
+    headers: {
+      "User-Agent": BROWSER_UA,
+      Authorization: `Badger ${token}`,
+      Prefer: "autoredeem",
+    },
+  });
+
+  if (!metaRes.ok) {
+    const body = await metaRes.text().catch(() => "");
+    throw new Error(
+      `OneDrive API returned HTTP ${metaRes.status}: ${body.substring(0, 500)}`
+    );
+  }
+
+  const metadata = await metaRes.json();
+  const downloadUrl = metadata["@content.downloadUrl"];
+
+  if (!downloadUrl) {
+    throw new Error(
+      `No @content.downloadUrl in API response. Keys: ${Object.keys(metadata).join(", ")}`
+    );
+  }
+
+  console.log("[download] Got download URL, fetching file...");
+
+  // Step 4: Download the actual file
+  const fileRes = await fetch(downloadUrl, {
+    headers: { "User-Agent": BROWSER_UA },
+  });
+
+  if (!fileRes.ok) {
+    throw new Error(`File download failed: HTTP ${fileRes.status}`);
+  }
+
+  return fileRes.arrayBuffer();
+}
+
+/**
+ * Fallback: try the old authkey-based approach for legacy links.
+ */
+async function downloadViaAuthKey(shareUrl: string): Promise<ArrayBuffer> {
+  console.log("[download] Trying legacy authkey method...");
+  const resolvedUrl = await resolveShareLink(shareUrl);
+  const url = new URL(resolvedUrl);
+
+  const resid = url.searchParams.get("resid") || url.searchParams.get("id");
+  const authkey = url.searchParams.get("authkey");
+  const cid = url.searchParams.get("cid") || resid?.split("!")[0];
+
+  if (!resid || !authkey || !cid) {
+    throw new Error(
+      `Could not extract resid/authkey/cid from resolved URL. ` +
+        `Params: ${url.search}`
+    );
+  }
+
+  const apiUrl = `https://api.onedrive.com/v1.0/drives/${cid}/items/${resid}?authkey=${authkey}`;
+  const metaRes = await fetch(apiUrl, {
+    headers: { "User-Agent": BROWSER_UA },
+  });
+
+  if (!metaRes.ok) {
+    throw new Error(`Legacy API returned HTTP ${metaRes.status}`);
+  }
+
+  const metadata = await metaRes.json();
+  const downloadUrl = metadata["@content.downloadUrl"];
+
+  if (!downloadUrl) {
+    throw new Error("No @content.downloadUrl in legacy API response");
+  }
+
+  const fileRes = await fetch(downloadUrl, {
+    headers: { "User-Agent": BROWSER_UA },
+  });
+
+  if (!fileRes.ok) {
+    throw new Error(`Legacy file download failed: HTTP ${fileRes.status}`);
+  }
+
+  return fileRes.arrayBuffer();
 }
 
 export interface ParsedWorkbook {
@@ -250,42 +389,46 @@ export interface ParsedWorkbook {
 /**
  * Download an Excel file from a OneDrive sharing URL and parse all worksheets
  * into structured records ready for Supabase insertion.
+ *
+ * Tries multiple strategies:
+ * 1. Badger Token + Redeem (works for new /c/ format links)
+ * 2. Legacy authkey method (works for old /s! format links)
  */
 export async function downloadAndParse(shareUrl: string): Promise<ParsedWorkbook> {
-  const downloadUrl = await resolveToDownloadUrl(shareUrl);
+  const errors: string[] = [];
 
-  const response = await fetch(downloadUrl, {
-    redirect: "follow",
-    headers: { "User-Agent": "HectarControlTower/2.0" },
-  });
-
-  if (!response.ok) {
-    // If the resolved URL failed, try the base64 shares API as fallback
-    const base64 = Buffer.from(shareUrl)
-      .toString("base64")
-      .replace(/\//g, "_")
-      .replace(/\+/g, "-")
-      .replace(/=+$/, "");
-    const fallbackUrl = `https://api.onedrive.com/v1.0/shares/u!${base64}/root/content`;
-
-    const fallbackRes = await fetch(fallbackUrl, {
-      redirect: "follow",
-      headers: { "User-Agent": "HectarControlTower/2.0" },
-    });
-
-    if (!fallbackRes.ok) {
-      throw new Error(
-        `Failed to download Excel (HTTP ${response.status}, fallback ${fallbackRes.status}). ` +
-        `Ensure sharing is set to "Anyone with the link" (not "People with existing access").`
-      );
-    }
-
-    const arrayBuffer = await fallbackRes.arrayBuffer();
+  // Strategy 1: Badger Token + Redeem (primary — for new-format links)
+  try {
+    console.log("[sync] Strategy 1: Badger Token + Redeem");
+    const arrayBuffer = await downloadViaBadger(shareUrl);
+    console.log(`[sync] Downloaded ${arrayBuffer.byteLength} bytes via Badger method`);
     return parseWorkbook(arrayBuffer);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[sync] Strategy 1 failed:", msg);
+    errors.push(`Badger Token: ${msg}`);
   }
 
-  const arrayBuffer = await response.arrayBuffer();
-  return parseWorkbook(arrayBuffer);
+  // Strategy 2: Legacy authkey method (for old-format links)
+  try {
+    console.log("[sync] Strategy 2: Legacy authkey method");
+    const arrayBuffer = await downloadViaAuthKey(shareUrl);
+    console.log(`[sync] Downloaded ${arrayBuffer.byteLength} bytes via legacy method`);
+    return parseWorkbook(arrayBuffer);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[sync] Strategy 2 failed:", msg);
+    errors.push(`Legacy authkey: ${msg}`);
+  }
+
+  throw new Error(
+    `Failed to download Excel file. All strategies failed:\n` +
+      errors.map((e, i) => `  ${i + 1}. ${e}`).join("\n") +
+      `\n\nTroubleshooting:\n` +
+      `  - Verify the sharing URL opens in an incognito browser window\n` +
+      `  - Ensure sharing is "Anyone with the link" (not "People in your org")\n` +
+      `  - Try generating a new sharing link`
+  );
 }
 
 async function parseWorkbook(arrayBuffer: ArrayBuffer): Promise<ParsedWorkbook> {

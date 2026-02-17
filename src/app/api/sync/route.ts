@@ -46,6 +46,8 @@ export async function POST(request: Request) {
   }
 
   try {
+    console.log("[/api/sync] Starting sync with URL:", shareUrl.substring(0, 60) + "...");
+
     // 1. Download and parse Excel
     const parsed = await downloadAndParse(shareUrl);
 
