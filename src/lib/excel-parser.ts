@@ -167,12 +167,53 @@ function cleanForDb(val: string | number | boolean | null): string | number | nu
 
 // ─── Download & Parse ────────────────────────────────────────────
 
-function toDownloadUrl(shareUrl: string): string {
+/**
+ * Resolve a OneDrive sharing URL to a direct download URL.
+ *
+ * For 1drv.ms short links: follow the redirect chain to get the real
+ * onedrive.live.com URL, then convert to download URL.
+ *
+ * For onedrive.live.com: swap /edit.aspx for /download.aspx.
+ *
+ * The Microsoft Graph API "encode sharing URL" approach also works:
+ * encode the sharing URL as base64, prefix with "u!", and call
+ * /shares/{encoded}/driveItem/content — but that requires auth.
+ *
+ * This approach uses the public download mechanism instead.
+ */
+async function resolveToDownloadUrl(shareUrl: string): Promise<string> {
   const url = new URL(shareUrl);
+
+  // For 1drv.ms short links, first resolve the redirect to get the real URL
   if (url.hostname === "1drv.ms") {
-    url.searchParams.set("download", "1");
-    return url.toString();
+    // Follow redirect manually to get the real OneDrive URL
+    const redirectRes = await fetch(shareUrl, {
+      redirect: "manual",
+      headers: { "User-Agent": "HectarControlTower/2.0" },
+    });
+
+    const location = redirectRes.headers.get("location");
+    if (location) {
+      // Now convert the resolved URL to a download URL
+      return convertToDownloadUrl(location);
+    }
+
+    // If no redirect, try the base64 encoding approach
+    // OneDrive supports: https://api.onedrive.com/v1.0/shares/u!{base64}/root/content
+    const base64 = Buffer.from(shareUrl)
+      .toString("base64")
+      .replace(/\//g, "_")
+      .replace(/\+/g, "-")
+      .replace(/=+$/, "");
+    return `https://api.onedrive.com/v1.0/shares/u!${base64}/root/content`;
   }
+
+  return convertToDownloadUrl(shareUrl);
+}
+
+function convertToDownloadUrl(shareUrl: string): string {
+  const url = new URL(shareUrl);
+
   if (url.hostname.includes("onedrive.live.com")) {
     url.pathname = url.pathname
       .replace(/\/edit\.aspx/i, "/download.aspx")
@@ -180,12 +221,20 @@ function toDownloadUrl(shareUrl: string): string {
     url.searchParams.set("download", "1");
     return url.toString();
   }
+
   if (url.hostname.includes("sharepoint.com")) {
     url.searchParams.set("download", "1");
     return url.toString();
   }
-  url.searchParams.set("download", "1");
-  return url.toString();
+
+  // Fallback: try the public OneDrive shares API
+  // This works for any valid sharing URL without authentication
+  const base64 = Buffer.from(shareUrl)
+    .toString("base64")
+    .replace(/\//g, "_")
+    .replace(/\+/g, "-")
+    .replace(/=+$/, "");
+  return `https://api.onedrive.com/v1.0/shares/u!${base64}/root/content`;
 }
 
 export interface ParsedWorkbook {
@@ -203,7 +252,7 @@ export interface ParsedWorkbook {
  * into structured records ready for Supabase insertion.
  */
 export async function downloadAndParse(shareUrl: string): Promise<ParsedWorkbook> {
-  const downloadUrl = toDownloadUrl(shareUrl);
+  const downloadUrl = await resolveToDownloadUrl(shareUrl);
 
   const response = await fetch(downloadUrl, {
     redirect: "follow",
@@ -211,13 +260,35 @@ export async function downloadAndParse(shareUrl: string): Promise<ParsedWorkbook
   });
 
   if (!response.ok) {
-    throw new Error(
-      `Failed to download Excel (HTTP ${response.status}). ` +
-      `Ensure sharing is set to "Anyone with the link".`
-    );
+    // If the resolved URL failed, try the base64 shares API as fallback
+    const base64 = Buffer.from(shareUrl)
+      .toString("base64")
+      .replace(/\//g, "_")
+      .replace(/\+/g, "-")
+      .replace(/=+$/, "");
+    const fallbackUrl = `https://api.onedrive.com/v1.0/shares/u!${base64}/root/content`;
+
+    const fallbackRes = await fetch(fallbackUrl, {
+      redirect: "follow",
+      headers: { "User-Agent": "HectarControlTower/2.0" },
+    });
+
+    if (!fallbackRes.ok) {
+      throw new Error(
+        `Failed to download Excel (HTTP ${response.status}, fallback ${fallbackRes.status}). ` +
+        `Ensure sharing is set to "Anyone with the link" (not "People with existing access").`
+      );
+    }
+
+    const arrayBuffer = await fallbackRes.arrayBuffer();
+    return parseWorkbook(arrayBuffer);
   }
 
   const arrayBuffer = await response.arrayBuffer();
+  return parseWorkbook(arrayBuffer);
+}
+
+async function parseWorkbook(arrayBuffer: ArrayBuffer): Promise<ParsedWorkbook> {
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(arrayBuffer);
 
