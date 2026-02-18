@@ -141,27 +141,44 @@ function cellValue(cell: ExcelJS.Cell): string | number | boolean | null {
   const val = cell.value;
   if (val === null || val === undefined) return null;
 
+  // Formula cells — extract the computed result
   if (typeof val === "object" && "result" in val) {
-    return (val as { result: unknown }).result as string | number | boolean | null;
+    const result = (val as { result: unknown }).result;
+    if (result === null || result === undefined) return null;
+    if (result instanceof Date) return result.toISOString().split("T")[0];
+    if (typeof result === "object") return null; // nested error objects
+    return result as string | number | boolean;
   }
+  // Rich text cells — concatenate text segments
   if (typeof val === "object" && "richText" in val) {
     return (val as { richText: { text: string }[] }).richText.map((t) => t.text).join("");
   }
+  // Date cells
   if (val instanceof Date) {
     return val.toISOString().split("T")[0]; // YYYY-MM-DD
   }
+  // Hyperlink cells
   if (typeof val === "object" && "hyperlink" in val) {
     return (val as { text?: string; hyperlink: string }).text || (val as { hyperlink: string }).hyperlink;
+  }
+  // Error cells (#REF!, #VALUE!, etc.)
+  if (typeof val === "object" && "error" in val) {
+    return null;
+  }
+  // Any other unrecognized object — return null instead of "[object Object]"
+  if (typeof val === "object") {
+    return null;
   }
   return val as string | number | boolean;
 }
 
-function cleanForDb(val: string | number | boolean | null): string | number | null {
+function cleanForDb(val: unknown): string | number | null {
   if (val === null || val === undefined) return null;
+  if (typeof val === "object") return null; // safety net for any remaining objects
   if (typeof val === "boolean") return val ? 1 : 0;
-  if (typeof val === "number") return isNaN(val) ? null : val;
+  if (typeof val === "number") return isNaN(val) || !isFinite(val) ? null : val;
   const s = String(val).trim();
-  if (!s || s === "-" || s === "NaN" || s === "nan" || s === "NaT" || s === "undefined") return null;
+  if (!s || s === "-" || s === "NaN" || s === "nan" || s === "NaT" || s === "undefined" || s === "[object Object]") return null;
   return s;
 }
 
