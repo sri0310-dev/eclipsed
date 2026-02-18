@@ -136,7 +136,7 @@ export default function ControlTower() {
   const [error, setError] = useState<string | null>(null);
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
   const [syncing, setSyncing] = useState(false);
-  const [showActive, setShowActive] = useState(true);
+  const [positionFilter, setPositionFilter] = useState<string>("all");
   const [sheetFilter, setSheetFilter] = useState<string>("all");
 
   // ─── Fetch trades from Supabase ──────────────────────────────
@@ -191,12 +191,31 @@ export default function ControlTower() {
     }
   };
 
-  // ─── Load on mount ──────────────────────────────────────────
+  // ─── Auto-sync: show cached data immediately, refresh if stale ──
 
   useEffect(() => {
+    // 1. Load cached data from Supabase instantly
     fetchTrades();
-    fetchSyncStatus();
+    fetchSyncStatus().then(() => {
+      // 2. If data is stale (>5 min old) or doesn't exist, auto-sync in background
+      // We check after fetchSyncStatus so we know the last sync time
+    });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Auto-trigger sync if data is stale (>5 min) or no data exists
+  useEffect(() => {
+    if (loading || syncing) return;
+
+    const shouldAutoSync =
+      trades.length === 0 || // No data at all
+      !syncStatus || // Never synced
+      (Date.now() - new Date(syncStatus.synced_at).getTime() > 5 * 60 * 1000); // Stale >5min
+
+    if (shouldAutoSync) {
+      console.log("[auto-sync] Data is stale, syncing in background...");
+      triggerSync();
+    }
+  }, [loading, trades.length, syncStatus]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Auto-refresh data every 60s
   useEffect(() => {
@@ -217,11 +236,28 @@ export default function ControlTower() {
       ? trades
       : trades.filter((t) => t.source_sheet === sheetFilter);
 
+    // Group by position status
+    const positionGroups = new Map<string, number>();
+    for (const t of filtered) {
+      const pos = (t.position ?? "Unknown").trim() || "Unknown";
+      positionGroups.set(pos, (positionGroups.get(pos) || 0) + 1);
+    }
+    const positions = [...positionGroups.entries()].sort((a, b) => b[1] - a[1]);
+
+    // Apply position filter
+    const pool = positionFilter === "all"
+      ? filtered
+      : filtered.filter((t) => (t.position ?? "").trim() === positionFilter);
+
     const active = filtered.filter(
       (t) => (t.position ?? "").toLowerCase().trim() === "active"
     );
-    const inactive = filtered.length - active.length;
-    const pool = active.length > 0 ? active : filtered;
+    const sold = filtered.filter(
+      (t) => (t.position ?? "").toLowerCase().trim() === "sold"
+    );
+    const inactive = filtered.filter(
+      (t) => (t.position ?? "").toLowerCase().trim() === "inactive"
+    );
 
     const byProduct = countBy(pool, "product");
     const byOrigin = countBy(pool, "origin");
@@ -257,8 +293,34 @@ export default function ControlTower() {
     const totalContainers = sumBy(pool, "no_of_containers");
     const totalQuantity = sumBy(pool, "quantity_mt");
 
+    // Cash flow analysis
+    const totalOutwards = sumBy(pool, "total_outwards");
+    const totalInwards = sumBy(pool, "total_inwards");
+    const outwardRemaining = sumBy(pool, "outward_remaining");
+    const inwardRemaining = sumBy(pool, "inward_remaining");
+    const totalAdvancePaid = sumBy(pool, "advance_paid");
+    const totalAdvanceFromBuyer = sumBy(pool, "advance_from_buyer");
+    const avgWorkingCapitalDays = pool.length > 0
+      ? pool.reduce((s, t) => s + (Number(t.working_capital_days) || 0), 0) / pool.filter(t => Number(t.working_capital_days) > 0).length || 0
+      : 0;
+
+    // P&L breakdown
+    const totalClearanceCharges = sumBy(pool, "clearance_charges");
+    const totalBrokerage = sumBy(pool, "brokerage");
+    const totalWarehouseLoss = sumBy(pool, "warehouse_loss");
+    const totalClaimsPaid = sumBy(pool, "claims_paid");
+    const totalClaimsReceived = sumBy(pool, "claims_received");
+    const totalInterestLoss = sumBy(pool, "interest_loss");
+    const totalExpenses = sumBy(pool, "total_expenses");
+
+    // Trade health: count trades with payment data
+    const tradesWithBL = pool.filter(t => t.bl_number).length;
+    const tradesWithETD = pool.filter(t => t.etd).length;
+    const tradesWithPaymentOut = pool.filter(t => Number(t.advance_paid) > 0).length;
+    const tradesWithPaymentIn = pool.filter(t => Number(t.advance_from_buyer) > 0).length;
+
     return {
-      active, inactive, filtered, sheets, pool,
+      active, inactive, sold, filtered, sheets, pool, positions,
       byProduct: topN(byProduct, 10),
       byOrigin: topN(byOrigin, 10),
       byMonth: monthSorted,
@@ -271,12 +333,13 @@ export default function ControlTower() {
       },
       matrix: { products: topProds, origins: topOrigs, values: matrix },
       financials: { totalPurchaseValue, totalSalesValue, totalGrossMargin, totalNetProfit, totalContainers, totalQuantity },
+      cashFlow: { totalOutwards, totalInwards, outwardRemaining, inwardRemaining, totalAdvancePaid, totalAdvanceFromBuyer, avgWorkingCapitalDays },
+      expenses: { totalClearanceCharges, totalBrokerage, totalWarehouseLoss, totalClaimsPaid, totalClaimsReceived, totalInterestLoss, totalExpenses },
+      health: { tradesWithBL, tradesWithETD, tradesWithPaymentOut, tradesWithPaymentIn, totalTrades: pool.length },
     };
   }, [trades, sheetFilter]);
 
-  const displayRows = analytics
-    ? showActive ? analytics.active : analytics.filtered
-    : [];
+  const displayRows = analytics ? analytics.pool : [];
 
   // ─── Visible columns (curated, not all 85) ─────────────────
 
@@ -324,7 +387,7 @@ export default function ControlTower() {
               disabled={syncing}
               className="px-3 py-1 text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded border border-zinc-700 transition-colors disabled:opacity-50"
             >
-              {syncing ? "Syncing..." : "Sync Now"}
+              {syncing ? "Syncing..." : "Refresh"}
             </button>
             {trades.length > 0 && (
               <div className="flex items-center gap-1.5">
@@ -416,23 +479,47 @@ export default function ControlTower() {
               </div>
             )}
 
+            {/* ═══ Position Status Chips ═══ */}
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-[11px] text-zinc-500">Position:</span>
+              <button
+                onClick={() => setPositionFilter("all")}
+                className={`px-2.5 py-1 text-[11px] rounded-full border transition-colors ${
+                  positionFilter === "all"
+                    ? "border-blue-700 bg-blue-900/30 text-blue-400"
+                    : "border-zinc-700 bg-zinc-800/50 text-zinc-400 hover:border-zinc-600"
+                }`}
+              >
+                All ({analytics.filtered.length})
+              </button>
+              {analytics.positions.map(([pos, count]) => (
+                <button
+                  key={pos}
+                  onClick={() => setPositionFilter(pos)}
+                  className={`px-2.5 py-1 text-[11px] rounded-full border transition-colors ${
+                    positionFilter === pos
+                      ? "border-blue-700 bg-blue-900/30 text-blue-400"
+                      : "border-zinc-700 bg-zinc-800/50 text-zinc-400 hover:border-zinc-600"
+                  }`}
+                >
+                  {pos} ({count})
+                </button>
+              ))}
+            </div>
+
             {/* ═══ Summary Metrics ═══ */}
             <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3">
               <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 px-4 py-3">
-                <div className="text-2xl font-bold text-emerald-400">{analytics.active.length}</div>
-                <div className="text-[11px] text-zinc-500">Active</div>
+                <div className="text-2xl font-bold text-blue-400">{analytics.pool.length}</div>
+                <div className="text-[11px] text-zinc-500">Trades</div>
               </div>
               <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 px-4 py-3">
-                <div className="text-2xl font-bold text-zinc-500">{analytics.inactive}</div>
-                <div className="text-[11px] text-zinc-500">Inactive</div>
-              </div>
-              <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 px-4 py-3">
-                <div className="text-2xl font-bold text-blue-400">{fmt(analytics.financials.totalContainers)}</div>
+                <div className="text-2xl font-bold text-cyan-400">{fmt(analytics.financials.totalContainers)}</div>
                 <div className="text-[11px] text-zinc-500">Containers</div>
               </div>
               <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 px-4 py-3">
-                <div className="text-2xl font-bold text-cyan-400">{fmt(analytics.financials.totalQuantity)}</div>
-                <div className="text-[11px] text-zinc-500">Quantity (MT)</div>
+                <div className="text-2xl font-bold text-zinc-300">{fmt(analytics.financials.totalQuantity)}</div>
+                <div className="text-[11px] text-zinc-500">Qty (MT)</div>
               </div>
               <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 px-4 py-3">
                 <div className="text-lg font-bold text-amber-400">{fmtCurrency(analytics.financials.totalPurchaseValue)}</div>
@@ -452,6 +539,74 @@ export default function ControlTower() {
                 </div>
                 <div className="text-[11px] text-zinc-500">Net Profit</div>
               </div>
+              <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 px-4 py-3">
+                <div className={`text-lg font-bold ${analytics.financials.totalNetProfit >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                  {analytics.financials.totalSalesValue > 0 ? ((analytics.financials.totalNetProfit / analytics.financials.totalSalesValue) * 100).toFixed(1) + "%" : "—"}
+                </div>
+                <div className="text-[11px] text-zinc-500">Margin %</div>
+              </div>
+            </div>
+
+            {/* ═══ Cash Flow & Expenses ═══ */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="rounded-lg border border-zinc-800 bg-zinc-900/30 p-4">
+                <h3 className="text-xs font-medium text-zinc-400 mb-3">Cash Flow Summary</h3>
+                <div className="space-y-2.5">
+                  <div className="flex justify-between text-xs">
+                    <span className="text-zinc-400">Total Paid to Sellers</span>
+                    <span className="text-red-400 font-mono">{fmtCurrency(analytics.cashFlow.totalOutwards)}</span>
+                  </div>
+                  <div className="flex justify-between text-xs">
+                    <span className="text-zinc-400">Total Received from Buyers</span>
+                    <span className="text-emerald-400 font-mono">{fmtCurrency(analytics.cashFlow.totalInwards)}</span>
+                  </div>
+                  <div className="border-t border-zinc-800 my-1" />
+                  <div className="flex justify-between text-xs">
+                    <span className="text-zinc-400">Still Owed to Sellers</span>
+                    <span className="text-amber-400 font-mono">{fmtCurrency(analytics.cashFlow.outwardRemaining)}</span>
+                  </div>
+                  <div className="flex justify-between text-xs">
+                    <span className="text-zinc-400">Still Owed by Buyers</span>
+                    <span className="text-amber-400 font-mono">{fmtCurrency(analytics.cashFlow.inwardRemaining)}</span>
+                  </div>
+                  <div className="border-t border-zinc-800 my-1" />
+                  <div className="flex justify-between text-xs">
+                    <span className="text-zinc-400">Net Cash Position</span>
+                    <span className={`font-mono font-medium ${(analytics.cashFlow.totalInwards - analytics.cashFlow.totalOutwards) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                      {fmtCurrency(analytics.cashFlow.totalInwards - analytics.cashFlow.totalOutwards)}
+                    </span>
+                  </div>
+                  {analytics.cashFlow.avgWorkingCapitalDays > 0 && (
+                    <div className="flex justify-between text-xs">
+                      <span className="text-zinc-400">Avg Working Capital Days</span>
+                      <span className="text-zinc-300 font-mono">{Math.round(analytics.cashFlow.avgWorkingCapitalDays)}d</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div className="rounded-lg border border-zinc-800 bg-zinc-900/30 p-4">
+                <h3 className="text-xs font-medium text-zinc-400 mb-3">Expense Breakdown</h3>
+                <div className="space-y-2.5">
+                  {[
+                    { label: "Clearance Charges", val: analytics.expenses.totalClearanceCharges },
+                    { label: "Brokerage", val: analytics.expenses.totalBrokerage },
+                    { label: "Warehouse Loss", val: analytics.expenses.totalWarehouseLoss },
+                    { label: "Claims Paid", val: analytics.expenses.totalClaimsPaid },
+                    { label: "Claims Received", val: analytics.expenses.totalClaimsReceived },
+                    { label: "Interest Loss", val: analytics.expenses.totalInterestLoss },
+                  ].filter(e => e.val !== 0).map(({ label, val }) => (
+                    <div key={label} className="flex justify-between text-xs">
+                      <span className="text-zinc-400">{label}</span>
+                      <span className={`font-mono ${val > 0 ? "text-red-400" : "text-emerald-400"}`}>{fmtCurrency(Math.abs(val))}</span>
+                    </div>
+                  ))}
+                  <div className="border-t border-zinc-800 my-1" />
+                  <div className="flex justify-between text-xs font-medium">
+                    <span className="text-zinc-300">Total Expenses</span>
+                    <span className="text-red-400 font-mono">{fmtCurrency(analytics.expenses.totalExpenses)}</span>
+                  </div>
+                </div>
+              </div>
             </div>
 
             {/* ═══ Position Book ═══ */}
@@ -459,17 +614,7 @@ export default function ControlTower() {
               <div className="flex items-center justify-between mb-2">
                 <div className="flex items-center gap-3">
                   <h2 className="text-sm font-semibold text-zinc-200">Position Book</h2>
-                  <span className="text-xs text-zinc-500">{displayRows.length} rows</span>
-                  <button
-                    onClick={() => setShowActive(!showActive)}
-                    className={`px-2 py-0.5 text-[11px] rounded-full border transition-colors ${
-                      showActive
-                        ? "border-emerald-800 bg-emerald-900/30 text-emerald-400"
-                        : "border-zinc-700 bg-zinc-800 text-zinc-400"
-                    }`}
-                  >
-                    {showActive ? "Active only" : "All"}
-                  </button>
+                  <span className="text-xs text-zinc-500">{displayRows.length} trades</span>
                 </div>
               </div>
               {displayRows.length > 0 ? (
@@ -492,21 +637,28 @@ export default function ControlTower() {
                       <tbody>
                         {displayRows.map((row, ri) => {
                           const posVal = (row.position ?? "").toLowerCase().trim();
+                          const rowOpacity = posVal === "inactive" ? "opacity-40" : "";
                           return (
-                            <tr key={row.id || ri} className={`border-b border-zinc-800/30 hover:bg-zinc-800/40 ${posVal === "inactive" ? "opacity-30" : ""}`}>
+                            <tr key={row.id || ri} className={`border-b border-zinc-800/30 hover:bg-zinc-800/40 ${rowOpacity}`}>
                               <td className="px-2 py-1.5 text-zinc-600 font-mono">{ri + 1}</td>
                               {columns.map((c) => {
                                 const v = row[c.key];
                                 const s = v !== null && v !== undefined ? String(v) : "—";
-                                const isActive = c.key === "position" && posVal === "active";
+                                const isPositionCol = c.key === "position";
                                 const isProfit = (c.key === "net_profit" || c.key === "gross_margin") && typeof v === "number";
+                                const posColor = isPositionCol
+                                  ? posVal === "active" ? "text-emerald-400 font-medium"
+                                  : posVal === "sold" ? "text-blue-400"
+                                  : posVal === "inactive" ? "text-zinc-500"
+                                  : "text-amber-400"
+                                  : "";
                                 return (
                                   <td
                                     key={c.key}
                                     className={`px-2 py-1.5 max-w-[140px] truncate ${
                                       c.align === "right" ? "text-right font-mono" : ""
                                     } ${
-                                      isActive ? "text-emerald-400 font-medium" :
+                                      isPositionCol ? posColor :
                                       isProfit && v !== null && (v as number) > 0 ? "text-emerald-400" :
                                       isProfit && v !== null && (v as number) < 0 ? "text-red-400" :
                                       "text-zinc-300"
@@ -525,7 +677,7 @@ export default function ControlTower() {
                 </div>
               ) : (
                 <div className="rounded-lg border border-zinc-800 bg-zinc-900/30 p-6 text-center text-sm text-zinc-500">
-                  No {showActive ? "active positions" : "data"} found
+                  No trades found for this filter
                 </div>
               )}
             </div>
