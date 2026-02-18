@@ -172,13 +172,57 @@ function cellValue(cell: ExcelJS.Cell): string | number | boolean | null {
   return val as string | number | boolean;
 }
 
-function cleanForDb(val: unknown): string | number | null {
+// Columns that are NUMERIC in the database — values must be coerced to numbers
+const NUMERIC_COLUMNS = new Set([
+  "price_per_lbs", "no_of_containers", "quantity_mt",
+  "purchase_price_per_mt", "sales_price_per_mt", "purchase_value",
+  "sales_value", "gross_margin", "clearance_charges", "brokerage",
+  "warehouse_loss", "claims_paid", "claims_received", "interest_loss",
+  "total_expenses", "net_profit", "profit_pct", "transit_days",
+  "advance_paid", "final_payment_paid", "total_outwards",
+  "outward_remaining", "outward_adjustment", "advance_from_buyer",
+  "second_payment_from_buyer", "third_payment_from_buyer",
+  "total_inwards", "inward_remaining", "inward_adjustment",
+  "working_capital_days", "supplier_1_sales_price", "supplier_1_invoice_value",
+  "supplier_2_sales_price", "supplier_2_invoice_value",
+  "supplier_3_sales_price", "supplier_3_invoice_value", "exchange_rate",
+  "quantity", "average_price", "marked_at", "mark_to_market",
+  "usd_to_inr", "usd_to_tzs", "usd_to_xaf", "usd_to_ngn",
+  "sum_no_of_containers", "sum_quantity_mt", "sum_purchase_value",
+  "sum_sales_value", "sum_gross_margin", "sum_net_profit",
+]);
+
+/**
+ * Strip currency symbols/prefixes, commas, whitespace from a string
+ * so it can be parsed as a number. Handles: Rs., $, €, ₹, USD, INR, etc.
+ */
+function extractNumber(s: string): number | null {
+  // Remove common currency prefixes/symbols and thousand separators
+  const cleaned = s
+    .replace(/^[A-Za-z₹$€£¥]+\.?\s*/g, "")  // "Rs.", "$", "USD ", "₹" etc.
+    .replace(/,/g, "")                         // thousand separators
+    .replace(/\s/g, "")                        // whitespace
+    .replace(/[()]/g, (m) => m === "(" ? "-" : ""); // (123) → -123
+
+  if (!cleaned || cleaned === "-") return null;
+  const n = Number(cleaned);
+  return isNaN(n) || !isFinite(n) ? null : n;
+}
+
+function cleanForDb(val: unknown, dbColumn?: string): string | number | null {
   if (val === null || val === undefined) return null;
-  if (typeof val === "object") return null; // safety net for any remaining objects
+  if (typeof val === "object") return null;
   if (typeof val === "boolean") return val ? 1 : 0;
   if (typeof val === "number") return isNaN(val) || !isFinite(val) ? null : val;
+
   const s = String(val).trim();
   if (!s || s === "-" || s === "NaN" || s === "nan" || s === "NaT" || s === "undefined" || s === "[object Object]") return null;
+
+  // If this is a numeric DB column, coerce to number
+  if (dbColumn && NUMERIC_COLUMNS.has(dbColumn)) {
+    return extractNumber(s);
+  }
+
   return s;
 }
 
@@ -554,7 +598,7 @@ function parseSheet(
       const dbCol = columnMap[header];
       if (!dbCol) continue;
 
-      const val = cleanForDb(cellValue(row.getCell(c)));
+      const val = cleanForDb(cellValue(row.getCell(c)), dbCol);
       if (val !== null) hasData = true;
       record[dbCol] = val;
     }
@@ -583,13 +627,13 @@ function parseFinancials(ws: ExcelJS.Worksheet): Record<string, unknown>[] {
     if (headerFound && firstCell) {
       records.push({
         excel_row: r,
-        row_label: cleanForDb(cellValue(row.getCell(1))),
-        sum_no_of_containers: cleanForDb(cellValue(row.getCell(2))),
-        sum_quantity_mt: cleanForDb(cellValue(row.getCell(3))),
-        sum_purchase_value: cleanForDb(cellValue(row.getCell(4))),
-        sum_sales_value: cleanForDb(cellValue(row.getCell(5))),
-        sum_gross_margin: cleanForDb(cellValue(row.getCell(6))),
-        sum_net_profit: cleanForDb(cellValue(row.getCell(7))),
+        row_label: cleanForDb(cellValue(row.getCell(1)), "row_label"),
+        sum_no_of_containers: cleanForDb(cellValue(row.getCell(2)), "sum_no_of_containers"),
+        sum_quantity_mt: cleanForDb(cellValue(row.getCell(3)), "sum_quantity_mt"),
+        sum_purchase_value: cleanForDb(cellValue(row.getCell(4)), "sum_purchase_value"),
+        sum_sales_value: cleanForDb(cellValue(row.getCell(5)), "sum_sales_value"),
+        sum_gross_margin: cleanForDb(cellValue(row.getCell(6)), "sum_gross_margin"),
+        sum_net_profit: cleanForDb(cellValue(row.getCell(7)), "sum_net_profit"),
       });
     }
   }
@@ -617,19 +661,19 @@ function parseMtm(ws: ExcelJS.Worksheet): Record<string, unknown>[] {
     if (!headerFound) continue;
     if (String(cellValue(row.getCell(1)) ?? "").trim() === "Commodity") continue;
 
-    const commodity = cleanForDb(cellValue(row.getCell(2)));
+    const commodity = cleanForDb(cellValue(row.getCell(2)), "commodity");
     if (!commodity) continue;
 
     records.push({
       excel_row: r,
       commodity,
-      position: cleanForDb(cellValue(row.getCell(3))),
-      quantity: cleanForDb(cellValue(row.getCell(4))),
-      no_of_containers: cleanForDb(cellValue(row.getCell(5))),
-      destination: cleanForDb(cellValue(row.getCell(6))),
-      average_price: cleanForDb(cellValue(row.getCell(7))),
-      marked_at: cleanForDb(cellValue(row.getCell(8))),
-      mark_to_market: cleanForDb(cellValue(row.getCell(9))),
+      position: cleanForDb(cellValue(row.getCell(3)), "position"),
+      quantity: cleanForDb(cellValue(row.getCell(4)), "quantity"),
+      no_of_containers: cleanForDb(cellValue(row.getCell(5)), "no_of_containers"),
+      destination: cleanForDb(cellValue(row.getCell(6)), "destination"),
+      average_price: cleanForDb(cellValue(row.getCell(7)), "average_price"),
+      marked_at: cleanForDb(cellValue(row.getCell(8)), "marked_at"),
+      mark_to_market: cleanForDb(cellValue(row.getCell(9)), "mark_to_market"),
     });
   }
 
