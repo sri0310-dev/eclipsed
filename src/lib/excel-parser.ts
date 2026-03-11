@@ -245,6 +245,26 @@ const PERSONAL_API = "https://my.microsoftpersonalcontent.com/_api/v2.0/shares";
 const BROWSER_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
+/** Fetch with a per-request timeout (default 15s) and descriptive errors */
+async function fetchWithTimeout(
+  url: string,
+  opts: RequestInit & { timeout?: number } = {}
+): Promise<Response> {
+  const { timeout = 15000, ...fetchOpts } = opts;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+  try {
+    return await fetch(url, { ...fetchOpts, signal: controller.signal });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new Error(`Request timed out after ${timeout}ms: ${url.substring(0, 100)}`);
+    }
+    throw new Error(`Network error fetching ${url.substring(0, 100)}: ${err instanceof Error ? err.message : String(err)}`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Simple in-memory Badger token cache (valid ~1 week)
 let cachedBadgerToken: { token: string; expiresAt: number } | null = null;
 
@@ -254,7 +274,7 @@ async function getBadgerToken(): Promise<string> {
   }
 
   console.log("[download] Requesting new Badger token...");
-  const res = await fetch(BADGER_TOKEN_URL, {
+  const res = await fetchWithTimeout(BADGER_TOKEN_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -287,7 +307,7 @@ async function getBadgerToken(): Promise<string> {
  */
 async function resolveShareLink(shareUrl: string): Promise<string> {
   // Approach 1: Follow all redirects, check final URL
-  const res = await fetch(shareUrl, {
+  const res = await fetchWithTimeout(shareUrl, {
     redirect: "follow",
     headers: { "User-Agent": BROWSER_UA },
   });
@@ -300,7 +320,7 @@ async function resolveShareLink(shareUrl: string): Promise<string> {
 
   // Approach 2: Check intermediate redirects (manual mode)
   // Sometimes the redeem param appears in the first redirect
-  const manualRes = await fetch(shareUrl, {
+  const manualRes = await fetchWithTimeout(shareUrl, {
     redirect: "manual",
     headers: { "User-Agent": BROWSER_UA },
   });
@@ -353,7 +373,7 @@ async function downloadViaBadger(shareUrl: string): Promise<ArrayBuffer> {
   const apiUrl = `${PERSONAL_API}/u!${redeem}/driveitem`;
   console.log("[download] Querying OneDrive API for download URL...");
 
-  const metaRes = await fetch(apiUrl, {
+  const metaRes = await fetchWithTimeout(apiUrl, {
     headers: {
       "User-Agent": BROWSER_UA,
       Authorization: `Badger ${token}`,
@@ -379,9 +399,10 @@ async function downloadViaBadger(shareUrl: string): Promise<ArrayBuffer> {
 
   console.log("[download] Got download URL, fetching file...");
 
-  // Step 4: Download the actual file
-  const fileRes = await fetch(downloadUrl, {
+  // Step 4: Download the actual file (allow 30s for large files)
+  const fileRes = await fetchWithTimeout(downloadUrl, {
     headers: { "User-Agent": BROWSER_UA },
+    timeout: 30000,
   });
 
   if (!fileRes.ok) {
@@ -411,7 +432,7 @@ async function downloadViaAuthKey(shareUrl: string): Promise<ArrayBuffer> {
   }
 
   const apiUrl = `https://api.onedrive.com/v1.0/drives/${cid}/items/${resid}?authkey=${authkey}`;
-  const metaRes = await fetch(apiUrl, {
+  const metaRes = await fetchWithTimeout(apiUrl, {
     headers: { "User-Agent": BROWSER_UA },
   });
 
@@ -426,8 +447,9 @@ async function downloadViaAuthKey(shareUrl: string): Promise<ArrayBuffer> {
     throw new Error("No @content.downloadUrl in legacy API response");
   }
 
-  const fileRes = await fetch(downloadUrl, {
+  const fileRes = await fetchWithTimeout(downloadUrl, {
     headers: { "User-Agent": BROWSER_UA },
+    timeout: 30000,
   });
 
   if (!fileRes.ok) {

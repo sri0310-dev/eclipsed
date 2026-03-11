@@ -2,6 +2,11 @@ import { NextResponse } from "next/server";
 import { getSupabase } from "@/lib/supabase";
 import { downloadAndParse } from "@/lib/excel-parser";
 
+// Allow up to 60 seconds for this route (Hobby plan max).
+// The Badger Token download makes 4-5 sequential HTTP calls to Microsoft APIs
+// which can easily exceed the default 10s timeout.
+export const maxDuration = 60;
+
 /**
  * POST /api/sync
  *
