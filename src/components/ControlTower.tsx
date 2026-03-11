@@ -2,7 +2,9 @@
 
 import { useState, useEffect, useCallback, useMemo } from "react";
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// TYPES
+// ═══════════════════════════════════════════════════════════════════════════════
 
 interface Trade {
   id: number;
@@ -25,6 +27,7 @@ interface Trade {
   profit_pct: number | null;
   total_expenses: number | null;
   bl_number: string | null;
+  bl_date: string | null;
   etd: string | null;
   eta: string | null;
   seller: string | null;
@@ -58,6 +61,8 @@ interface Trade {
   third_payment_from_buyer: number | null;
   contract_reference_number: string | null;
   sales_contract_reference_number: string | null;
+  broker: string | null;
+  buyer_broker: string | null;
   [key: string]: unknown;
 }
 
@@ -69,27 +74,40 @@ interface SyncStatus {
   sheets_synced: string[];
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+type DealStage = "need_buyer" | "collecting_payment" | "waiting_to_ship" | "at_sea" | "done";
+type Page = "today" | "all_trades" | "open_positions" | "payments_out" | "payments_in" | "pnl";
 
-function fmtCurrency(n: number | null | undefined): string {
-  if (n === null || n === undefined || isNaN(n)) return "—";
-  if (Math.abs(n) >= 1_000_000) return "$" + (n / 1_000_000).toFixed(1) + "M";
-  if (Math.abs(n) >= 1_000) return "$" + (n / 1_000).toFixed(0) + "K";
-  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(n);
+// ═══════════════════════════════════════════════════════════════════════════════
+// HELPERS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function n(v: unknown): number { return Number(v) || 0; }
+function has(v: unknown): boolean { return v !== null && v !== undefined && String(v).trim() !== "" && String(v).trim() !== "—"; }
+
+function fmtK(num: number | null | undefined): string {
+  if (num === null || num === undefined || isNaN(num)) return "—";
+  if (Math.abs(num) >= 1_000_000) return "$" + (num / 1_000_000).toFixed(2) + "M";
+  if (Math.abs(num) >= 1_000) return "$" + (num / 1_000).toFixed(0) + "K";
+  return "$" + num.toFixed(0);
 }
 
-function fmtFull(n: number | null | undefined): string {
-  if (n === null || n === undefined || isNaN(n)) return "—";
-  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(n);
+function fmtFull(num: number | null | undefined): string {
+  if (num === null || num === undefined || isNaN(num)) return "—";
+  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(num);
 }
 
-function fmt(n: number | null | undefined): string {
-  if (n === null || n === undefined || isNaN(n)) return "—";
-  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(n);
+function fmt(num: number | null | undefined): string {
+  if (num === null || num === undefined || isNaN(num)) return "—";
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(num);
 }
 
-function pctStr(part: number, total: number): string {
-  return total > 0 ? ((part / total) * 100).toFixed(1) + "%" : "—";
+function fmtDate(d: string | null | undefined): string {
+  if (!d) return "—";
+  try {
+    const date = new Date(d);
+    if (isNaN(date.getTime())) return d;
+    return date.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "2-digit" });
+  } catch { return d; }
 }
 
 function timeAgo(dateStr: string): string {
@@ -102,318 +120,959 @@ function timeAgo(dateStr: string): string {
   return `${Math.floor(hrs / 24)}d ago`;
 }
 
-function n(v: unknown): number {
-  return Number(v) || 0;
-}
-
-/**
- * Position semantics (user-defined):
- * - "Inactive" = fully completed, all transactions settled (gray in Excel)
- * - "Sold" = at port, financial close in progress (blue in Excel) — ONLY "Sold"
- * - "Long" = open position (same as other open positions)
- * - Everything else = open / in transit / at origin / contracts
- */
-function positionStage(pos: string): "completed" | "at_port" | "open" {
-  const p = (pos || "").toLowerCase().trim();
-  if (p === "inactive") return "completed";
-  if (p === "sold") return "at_port";
-  return "open"; // "long", "open", blank, everything else = open/active
-}
-
-function stageBadge(pos: string) {
-  const stage = positionStage(pos);
-  if (stage === "completed") return { label: "Completed", cls: "bg-zinc-700/50 text-zinc-400" };
-  if (stage === "at_port") return { label: "At Port", cls: "bg-blue-900/40 text-blue-300" };
-  return { label: pos || "Open", cls: "bg-amber-900/30 text-amber-300" };
-}
-
 function sumBy(trades: Trade[], field: keyof Trade): number {
   return trades.reduce((s, t) => s + n(t[field]), 0);
 }
 
-function groupSum(trades: Trade[], groupField: keyof Trade, sumField: keyof Trade): [string, number][] {
-  const map = new Map<string, number>();
-  for (const t of trades) {
-    const key = String(t[groupField] ?? "").trim();
-    if (!key || key === "—") continue;
-    map.set(key, (map.get(key) || 0) + n(t[sumField]));
+// ═══════════════════════════════════════════════════════════════════════════════
+// DEAL LIFECYCLE CLASSIFICATION
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// A commodity trade moves through these stages:
+//   1. Need a Buyer — purchase contract exists but no sales contract yet
+//   2. Waiting to Ship — both sides contracted, awaiting shipment (no B/L)
+//   3. At Sea — B/L issued, cargo in transit
+//   4. Collecting Payment — goods arrived/delivered, buyer owes money
+//   5. Done — fully settled (position = "Inactive")
+//
+// Classification logic:
+//   "Inactive" position → Done (all payments settled)
+//   "Sold" position → Collecting Payment (at port, financial close)
+//   No buyer → Need a Buyer (open exposure)
+//   Has buyer + no B/L → Waiting to Ship
+//   Has B/L → At Sea (in transit)
+
+function classifyDeal(t: Trade): DealStage {
+  const pos = (t.position || "").toLowerCase().trim();
+  if (pos === "inactive") return "done";
+  if (pos === "sold") return "collecting_payment";
+  if (!has(t.buyer)) return "need_buyer";
+  if (!has(t.bl_number)) return "waiting_to_ship";
+  return "at_sea";
+}
+
+const STAGE_CONFIG: Record<DealStage, { label: string; color: string; dot: string; desc: string }> = {
+  need_buyer:         { label: "Need a Buyer",       color: "text-violet-700", dot: "bg-violet-500", desc: "Open exposure" },
+  collecting_payment: { label: "Collecting Payment",  color: "text-amber-700",  dot: "bg-amber-500",  desc: "Outstanding receivables" },
+  waiting_to_ship:    { label: "Waiting to Ship",     color: "text-emerald-700", dot: "bg-emerald-500", desc: "B/L not yet issued" },
+  at_sea:             { label: "At Sea",              color: "text-sky-700",    dot: "bg-sky-500",    desc: "" },
+  done:               { label: "Done",                color: "text-gray-500",   dot: "bg-gray-400",   desc: "Fully settled" },
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PAYMENT TERM PARSING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+interface PaymentScheduleItem {
+  label: string;
+  amount: number;
+  dueDate: Date | null;
+  dueLabel: string;
+}
+
+function parseDate(d: string | null | undefined): Date | null {
+  if (!d) return null;
+  const date = new Date(d);
+  return isNaN(date.getTime()) ? null : date;
+}
+
+function addDays(d: Date, days: number): Date {
+  const r = new Date(d);
+  r.setDate(r.getDate() + days);
+  return r;
+}
+
+function monthLabel(d: Date): string {
+  return d.toLocaleDateString("en-US", { month: "short", year: "numeric" }).toUpperCase();
+}
+
+/**
+ * Parse seller payment terms into approximate due dates.
+ * Terms from "Payment Terms" column.
+ */
+function parseSellerPaymentSchedule(t: Trade): PaymentScheduleItem[] {
+  const term = (t.payment_terms || "").trim();
+  const purchaseVal = n(t.purchase_value);
+  if (!term || purchaseVal === 0) return [];
+
+  const etd = parseDate(t.etd);
+  const eta = parseDate(t.eta);
+  const blDate = parseDate(t.bl_date);
+  const termLower = term.toLowerCase();
+
+  // Split terms: "10+90", "5%+95%", "10%+90%", "15%+85%"
+  const splitMatch = term.match(/(\d+)\s*[%]?\s*\+\s*(\d+)\s*[%]?/);
+  if (splitMatch) {
+    const pct1 = parseInt(splitMatch[1]) / 100;
+    const pct2 = parseInt(splitMatch[2]) / 100;
+    return [
+      { label: `${splitMatch[1]}% advance`, amount: purchaseVal * pct1, dueDate: etd, dueLabel: etd ? `On ETD (${fmtDate(t.etd)})` : "On ETD" },
+      { label: `${splitMatch[2]}% balance`, amount: purchaseVal * pct2, dueDate: eta, dueLabel: eta ? `On arrival (${fmtDate(t.eta)})` : "On arrival" },
+    ];
   }
-  return [...map.entries()].sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]));
+
+  // "100% CAD" / "CAD" / "100% on Loading" / "Pre Shipment"
+  if (termLower.includes("cad") || termLower.includes("loading") || termLower.includes("pre shipment") || termLower.includes("pre-shipment")) {
+    return [{ label: "100% CAD", amount: purchaseVal, dueDate: etd, dueLabel: etd ? `On ETD (${fmtDate(t.etd)})` : "On/before ETD" }];
+  }
+
+  // "100% TT N days Before vessel arrival"
+  const ttBeforeMatch = termLower.match(/(\d+)\s*days?\s*before/);
+  if (ttBeforeMatch && eta) {
+    const daysBefore = parseInt(ttBeforeMatch[1]);
+    const due = addDays(eta, -daysBefore);
+    return [{ label: `TT ${daysBefore}d before arrival`, amount: purchaseVal, dueDate: due, dueLabel: `${fmtDate(due.toISOString())}` }];
+  }
+
+  // "On BL Copies" / "100% TT upon Copy BL"
+  if (termLower.includes("bl cop") || termLower.includes("copy bl") || termLower.includes("upon bl")) {
+    const due = blDate ? addDays(blDate, 2) : null;
+    return [{ label: "On B/L copies", amount: purchaseVal, dueDate: due, dueLabel: due ? `BL+2d (${fmtDate(due.toISOString())})` : "On B/L receipt" }];
+  }
+
+  // "DP at Sight" / "through Bank"
+  if (termLower.includes("dp at sight") || termLower.includes("through bank")) {
+    return [{ label: "DP at sight", amount: purchaseVal, dueDate: eta, dueLabel: eta ? `On arrival (${fmtDate(t.eta)})` : "On arrival" }];
+  }
+
+  // Default: assume due on ETD
+  return [{ label: term, amount: purchaseVal, dueDate: etd || eta, dueLabel: etd ? fmtDate(t.etd) : (eta ? fmtDate(t.eta) : "TBD") }];
 }
 
-// ─── Bar component ────────────────────────────────────────────────────────────
+/**
+ * Parse buyer payment terms into approximate expected receipt dates.
+ * Terms from "Buyer Payment Term" column.
+ */
+function parseBuyerPaymentSchedule(t: Trade): PaymentScheduleItem[] {
+  const term = (t.buyer_payment_term || "").trim();
+  const salesVal = n(t.sales_value);
+  if (!term || salesVal === 0) return [];
 
-function HBar({ label, value, max, color, prefix = "$" }: { label: string; value: number; max: number; color: string; prefix?: string }) {
-  const w = max > 0 ? Math.max(4, (Math.abs(value) / Math.abs(max)) * 100) : 0;
-  return (
-    <div className="flex items-center gap-2 text-xs group">
-      <span className="w-28 truncate text-zinc-400 text-right shrink-0">{label}</span>
-      <div className="flex-1 h-5 bg-zinc-800/50 rounded overflow-hidden">
-        <div className={`h-full ${color} rounded`} style={{ width: `${w}%` }} />
-      </div>
-      <span className="w-20 text-zinc-400 text-right font-mono shrink-0 text-[11px]">
-        {prefix === "$" ? fmtCurrency(value) : fmt(value)}
-      </span>
-    </div>
-  );
+  const eta = parseDate(t.eta);
+  const blDate = parseDate(t.bl_date);
+  const termLower = term.toLowerCase();
+
+  // Split terms: "HSS 15%+85%", "10% ADVANCE AND 90% CAD"
+  const splitMatch = term.match(/(\d+)\s*[%]?\s*(?:\+|and)\s*(\d+)\s*[%]?/i);
+  if (splitMatch) {
+    const pct1 = parseInt(splitMatch[1]) / 100;
+    const pct2 = parseInt(splitMatch[2]) / 100;
+    const advDate = parseDate(t.advance_received_on);
+    return [
+      { label: `${splitMatch[1]}% advance`, amount: salesVal * pct1, dueDate: advDate, dueLabel: advDate ? fmtDate(t.advance_received_on) : "On contract" },
+      { label: `${splitMatch[2]}% balance`, amount: salesVal * pct2, dueDate: eta, dueLabel: eta ? `On arrival (${fmtDate(t.eta)})` : "On arrival" },
+    ];
+  }
+
+  // "On Delivery" / "Payment after Delivery" / "After Delivery"
+  if (termLower.includes("delivery") || termLower.includes("after delivery")) {
+    const due = eta ? addDays(eta, 1) : null;
+    return [{ label: "On delivery", amount: salesVal, dueDate: due, dueLabel: due ? fmtDate(due.toISOString()) : "On delivery" }];
+  }
+
+  // "N days after delivery"
+  const daysAfterMatch = termLower.match(/(\d+)\s*days?\s*after/);
+  if (daysAfterMatch && eta) {
+    const days = parseInt(daysAfterMatch[1]);
+    const due = addDays(eta, days);
+    return [{ label: `${days}d after delivery`, amount: salesVal, dueDate: due, dueLabel: fmtDate(due.toISOString()) }];
+  }
+
+  // "100% CAD on Vessel Arrival" / "CAD"
+  if (termLower.includes("cad") || termLower.includes("vessel arrival")) {
+    return [{ label: "CAD on arrival", amount: salesVal, dueDate: eta, dueLabel: eta ? fmtDate(t.eta) : "On arrival" }];
+  }
+
+  // "DP at Sight"
+  if (termLower.includes("dp at sight")) {
+    return [{ label: "DP at sight", amount: salesVal, dueDate: eta, dueLabel: eta ? fmtDate(t.eta) : "On arrival" }];
+  }
+
+  // "100% on copy BL" / "TT Payment" / "TT upon BL"
+  if (termLower.includes("copy bl") || termLower.includes("upon bl") || termLower.includes("tt payment")) {
+    const due = blDate ? addDays(blDate, 4) : null;
+    return [{ label: "On B/L copies", amount: salesVal, dueDate: due, dueLabel: due ? fmtDate(due.toISOString()) : "On B/L" }];
+  }
+
+  // "Through Bank" / "DA" / "DA 45 DAYS"
+  const daMatch = termLower.match(/da\s*(\d+)/);
+  if (daMatch && eta) {
+    const days = parseInt(daMatch[1]);
+    const due = addDays(eta, days);
+    return [{ label: `DA ${days} days`, amount: salesVal, dueDate: due, dueLabel: fmtDate(due.toISOString()) }];
+  }
+  if (termLower.includes("through bank") || termLower === "da") {
+    const due = eta ? addDays(eta, 5) : null;
+    return [{ label: "Through bank", amount: salesVal, dueDate: due, dueLabel: due ? fmtDate(due.toISOString()) : "On arrival" }];
+  }
+
+  // Default
+  return [{ label: term, amount: salesVal, dueDate: eta, dueLabel: eta ? fmtDate(t.eta) : "TBD" }];
 }
 
-// ─── Deal Drilldown Modal ─────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// DEAL DETAIL MODAL
+// ═══════════════════════════════════════════════════════════════════════════════
 
-function DealModal({ trade, onClose }: { trade: Trade; onClose: () => void }) {
-  const badge = stageBadge(trade.position || "");
-  const grossMargin = n(trade.gross_margin);
-  const totalExp = n(trade.total_expenses);
-  const netProfit = n(trade.net_profit);
-  const purchaseVal = n(trade.purchase_value);
-  const salesVal = n(trade.sales_value);
+function DealModal({ trade: t, onClose }: { trade: Trade; onClose: () => void }) {
+  const stage = classifyDeal(t);
+  const cfg = STAGE_CONFIG[stage];
+  const grossMargin = n(t.gross_margin);
+  const totalExp = n(t.total_expenses);
+  const netProfit = n(t.net_profit);
+  const purchaseVal = n(t.purchase_value);
+  const salesVal = n(t.sales_value);
   const marginPct = salesVal > 0 ? ((netProfit / salesVal) * 100).toFixed(2) : "—";
 
   const expenses = [
-    { label: "Clearance Charges", val: n(trade.clearance_charges) },
-    { label: "Brokerage", val: n(trade.brokerage) },
-    { label: "Warehouse Loss", val: n(trade.warehouse_loss) },
-    { label: "Claims Paid", val: n(trade.claims_paid) },
-    { label: "Claims Received", val: n(trade.claims_received) },
-    { label: "Interest Loss", val: n(trade.interest_loss) },
-  ].filter(e => e.val !== 0);
-
-  const cashFlowItems = [
-    { label: "Advance Paid to Seller", val: n(trade.advance_paid), color: "text-red-400", date: trade.advance_paid_on },
-    { label: "Final Payment to Seller", val: n(trade.final_payment_paid), color: "text-red-400", date: trade.final_payment_amount_paid_on },
-    { label: "Total Paid (Outwards)", val: n(trade.total_outwards), color: "text-red-400", date: null },
-    { label: "Advance from Buyer", val: n(trade.advance_from_buyer), color: "text-emerald-400", date: trade.advance_received_on },
-    { label: "2nd Payment from Buyer", val: n(trade.second_payment_from_buyer), color: "text-emerald-400", date: trade.payment_received_on },
-    { label: "3rd Payment from Buyer", val: n(trade.third_payment_from_buyer), color: "text-emerald-400", date: null },
-    { label: "Total Received (Inwards)", val: n(trade.total_inwards), color: "text-emerald-400", date: null },
+    { label: "Clearance Charges", val: n(t.clearance_charges) },
+    { label: "Brokerage", val: n(t.brokerage) },
+    { label: "Warehouse Loss", val: n(t.warehouse_loss) },
+    { label: "Claims Paid", val: n(t.claims_paid) },
+    { label: "Claims Received", val: -n(t.claims_received) },
+    { label: "Interest Loss", val: n(t.interest_loss) },
   ].filter(e => e.val !== 0);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm" onClick={onClose}>
-      <div className="bg-zinc-900 border border-zinc-700 rounded-xl max-w-2xl w-full mx-4 max-h-[85vh] overflow-y-auto shadow-2xl" onClick={e => e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/30 backdrop-blur-sm" onClick={onClose}>
+      <div className="bg-white rounded-t-2xl sm:rounded-2xl max-w-lg w-full mx-0 sm:mx-4 max-h-[90vh] overflow-y-auto shadow-2xl" onClick={e => e.stopPropagation()}>
         {/* Header */}
-        <div className="sticky top-0 bg-zinc-900 border-b border-zinc-800 px-6 py-4 flex items-start justify-between">
+        <div className="sticky top-0 bg-white border-b border-gray-100 px-5 py-4 flex items-start justify-between rounded-t-2xl">
           <div>
-            <div className="flex items-center gap-3 mb-1">
-              <h2 className="text-lg font-bold text-zinc-100">{trade.product || "Unknown"}</h2>
-              <span className={`px-2 py-0.5 rounded text-[11px] font-medium ${badge.cls}`}>{badge.label}</span>
+            <div className="flex items-center gap-2 mb-0.5">
+              <h2 className="text-base font-bold text-gray-900">{t.product || "Unknown"}</h2>
+              <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium bg-gray-100 ${cfg.color}`}>
+                <span className={`w-1.5 h-1.5 rounded-full ${cfg.dot}`} />
+                {cfg.label}
+              </span>
             </div>
-            <div className="flex items-center gap-4 text-xs text-zinc-500">
-              {trade.trade_no && <span>Trade #{trade.trade_no}</span>}
-              {trade.origin && <span>{trade.origin}</span>}
-              {trade.variety && <span>{trade.variety}</span>}
-              {trade.source_sheet && <span>{trade.source_sheet}</span>}
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-gray-400">
+              {t.trade_no && <span>{t.commodity_code || t.source_sheet}-{t.trade_no}</span>}
+              {t.origin && <span>{t.origin}</span>}
+              {t.variety && <span>{t.variety}</span>}
             </div>
           </div>
-          <button onClick={onClose} className="text-zinc-500 hover:text-zinc-300 text-xl leading-none p-1">&times;</button>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xl p-1">&times;</button>
         </div>
 
-        <div className="px-6 py-4 space-y-5">
+        <div className="px-5 py-4 space-y-5">
           {/* Counterparties */}
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <div className="text-[10px] text-zinc-500 uppercase tracking-wider mb-1">Seller (We Buy From)</div>
-              <div className="text-sm text-zinc-200">{trade.seller || "—"}</div>
-              {trade.payment_terms && <div className="text-[11px] text-zinc-500 mt-0.5">Terms: {trade.payment_terms}</div>}
+              <div className="text-[10px] text-gray-400 uppercase tracking-wider mb-1">Seller</div>
+              <div className="text-sm font-medium text-gray-900">{t.seller || "—"}</div>
+              {t.payment_terms && <div className="text-[11px] text-gray-400 mt-0.5">{t.payment_terms}</div>}
             </div>
             <div>
-              <div className="text-[10px] text-zinc-500 uppercase tracking-wider mb-1">Buyer (We Sell To)</div>
-              <div className="text-sm text-zinc-200">{trade.buyer || "—"}</div>
-              {trade.buyer_payment_term && <div className="text-[11px] text-zinc-500 mt-0.5">Terms: {trade.buyer_payment_term}</div>}
+              <div className="text-[10px] text-gray-400 uppercase tracking-wider mb-1">Buyer</div>
+              <div className="text-sm font-medium text-gray-900">{t.buyer || <span className="text-amber-600 italic">Not yet assigned</span>}</div>
+              {t.buyer_payment_term && <div className="text-[11px] text-gray-400 mt-0.5">{t.buyer_payment_term}</div>}
             </div>
           </div>
 
-          {/* Trade Economics */}
-          <div>
-            <div className="text-[10px] text-zinc-500 uppercase tracking-wider mb-2">Trade Economics</div>
-            <div className="grid grid-cols-4 gap-3">
-              <div className="bg-zinc-800/50 rounded-lg px-3 py-2">
-                <div className="text-xs text-zinc-500">Qty (MT)</div>
-                <div className="text-sm font-bold text-zinc-200">{fmt(trade.quantity_mt)}</div>
+          {/* Trade summary */}
+          <div className="grid grid-cols-4 gap-2">
+            {[
+              { label: "Qty (MT)", value: fmt(t.quantity_mt) },
+              { label: "Containers", value: fmt(t.no_of_containers) },
+              { label: "Buy $/MT", value: fmtFull(t.purchase_price_per_mt) },
+              { label: "Sell $/MT", value: fmtFull(t.sales_price_per_mt) },
+            ].map(({ label, value }) => (
+              <div key={label} className="bg-gray-50 rounded-lg px-3 py-2">
+                <div className="text-[10px] text-gray-400">{label}</div>
+                <div className="text-sm font-semibold text-gray-900">{value}</div>
               </div>
-              <div className="bg-zinc-800/50 rounded-lg px-3 py-2">
-                <div className="text-xs text-zinc-500">Containers</div>
-                <div className="text-sm font-bold text-zinc-200">{fmt(trade.no_of_containers)}</div>
-              </div>
-              <div className="bg-zinc-800/50 rounded-lg px-3 py-2">
-                <div className="text-xs text-zinc-500">Buy $/MT</div>
-                <div className="text-sm font-bold text-zinc-200">{fmtFull(trade.purchase_price_per_mt)}</div>
-              </div>
-              <div className="bg-zinc-800/50 rounded-lg px-3 py-2">
-                <div className="text-xs text-zinc-500">Sell $/MT</div>
-                <div className="text-sm font-bold text-zinc-200">{fmtFull(trade.sales_price_per_mt)}</div>
-              </div>
-            </div>
+            ))}
           </div>
 
           {/* Margin Waterfall */}
           <div>
-            <div className="text-[10px] text-zinc-500 uppercase tracking-wider mb-2">Margin Breakdown</div>
-            <div className="bg-zinc-800/30 rounded-lg p-4 space-y-2">
-              <div className="flex justify-between text-xs">
-                <span className="text-zinc-400">Purchase Value</span>
-                <span className="text-red-400 font-mono">{fmtFull(purchaseVal)}</span>
-              </div>
-              <div className="flex justify-between text-xs">
-                <span className="text-zinc-400">Sales Value</span>
-                <span className="text-emerald-400 font-mono">{fmtFull(salesVal)}</span>
-              </div>
-              <div className="border-t border-zinc-700 my-1" />
-              <div className="flex justify-between text-xs font-medium">
-                <span className="text-zinc-300">Gross Margin</span>
-                <span className={`font-mono ${grossMargin >= 0 ? "text-emerald-400" : "text-red-400"}`}>{fmtFull(grossMargin)}</span>
-              </div>
-              {expenses.length > 0 && (
-                <>
-                  <div className="border-t border-zinc-700/50 my-1" />
-                  {expenses.map(({ label, val }) => (
-                    <div key={label} className="flex justify-between text-xs">
-                      <span className="text-zinc-500 pl-2">- {label}</span>
-                      <span className="text-red-400/70 font-mono">{fmtFull(Math.abs(val))}</span>
-                    </div>
-                  ))}
-                  <div className="flex justify-between text-xs">
-                    <span className="text-zinc-400 pl-2">Total Expenses</span>
-                    <span className="text-red-400 font-mono">{fmtFull(totalExp)}</span>
-                  </div>
-                </>
-              )}
-              <div className="border-t border-zinc-700 my-1" />
-              <div className="flex justify-between text-sm font-bold">
-                <span className="text-zinc-200">Net Profit</span>
-                <span className={`font-mono ${netProfit >= 0 ? "text-emerald-400" : "text-red-400"}`}>{fmtFull(netProfit)}</span>
-              </div>
-              <div className="flex justify-between text-xs">
-                <span className="text-zinc-500">Net Margin %</span>
-                <span className={`font-mono ${netProfit >= 0 ? "text-emerald-400" : "text-red-400"}`}>{marginPct}%</span>
-              </div>
+            <h3 className="text-xs font-semibold text-gray-700 mb-2">Margin Breakdown</h3>
+            <div className="bg-gray-50 rounded-lg p-4 space-y-1.5 text-xs">
+              <div className="flex justify-between"><span className="text-gray-500">Purchase Value</span><span className="font-mono text-gray-700">{fmtFull(purchaseVal)}</span></div>
+              <div className="flex justify-between"><span className="text-gray-500">Sales Value</span><span className="font-mono text-gray-700">{fmtFull(salesVal)}</span></div>
+              <div className="border-t border-gray-200 my-1" />
+              <div className="flex justify-between font-medium"><span className="text-gray-700">Gross Margin</span><span className={`font-mono ${grossMargin >= 0 ? "text-emerald-700" : "text-red-600"}`}>{fmtFull(grossMargin)}</span></div>
+              {expenses.length > 0 && expenses.map(({ label, val }) => (
+                <div key={label} className="flex justify-between pl-3"><span className="text-gray-400">{label}</span><span className="font-mono text-red-500">{fmtFull(val)}</span></div>
+              ))}
+              {totalExp !== 0 && <div className="flex justify-between pl-3"><span className="text-gray-500">Total Expenses</span><span className="font-mono text-red-600">{fmtFull(totalExp)}</span></div>}
+              <div className="border-t border-gray-200 my-1" />
+              <div className="flex justify-between text-sm font-bold"><span className="text-gray-900">Net Profit</span><span className={`font-mono ${netProfit >= 0 ? "text-emerald-700" : "text-red-600"}`}>{fmtFull(netProfit)}</span></div>
+              <div className="flex justify-between"><span className="text-gray-400">Net Margin</span><span className={`font-mono ${netProfit >= 0 ? "text-emerald-700" : "text-red-600"}`}>{marginPct}%</span></div>
             </div>
           </div>
 
-          {/* Cash Flow Timeline */}
-          {cashFlowItems.length > 0 && (
+          {/* Cash Flow */}
+          {(n(t.total_outwards) > 0 || n(t.total_inwards) > 0) && (
             <div>
-              <div className="text-[10px] text-zinc-500 uppercase tracking-wider mb-2">Cash Flow</div>
-              <div className="bg-zinc-800/30 rounded-lg p-4 space-y-2">
-                {cashFlowItems.map(({ label, val, color, date }) => (
-                  <div key={label} className="flex items-center justify-between text-xs">
-                    <div className="flex items-center gap-2">
-                      <span className="text-zinc-400">{label}</span>
-                      {date && <span className="text-[10px] text-zinc-600">{date}</span>}
-                    </div>
-                    <span className={`font-mono ${color}`}>{fmtFull(val)}</span>
-                  </div>
-                ))}
-                <div className="border-t border-zinc-700 my-1" />
-                <div className="flex justify-between text-xs">
-                  <span className="text-zinc-400">Still Owed to Seller</span>
-                  <span className="text-amber-400 font-mono">{fmtFull(n(trade.outward_remaining))}</span>
-                </div>
-                <div className="flex justify-between text-xs">
-                  <span className="text-zinc-400">Still Owed by Buyer</span>
-                  <span className="text-amber-400 font-mono">{fmtFull(n(trade.inward_remaining))}</span>
-                </div>
-                {n(trade.working_capital_days) > 0 && (
-                  <div className="flex justify-between text-xs">
-                    <span className="text-zinc-400">Working Capital Days</span>
-                    <span className="text-zinc-300 font-mono">{fmt(trade.working_capital_days)}d</span>
-                  </div>
-                )}
+              <h3 className="text-xs font-semibold text-gray-700 mb-2">Cash Flow</h3>
+              <div className="bg-gray-50 rounded-lg p-4 space-y-1.5 text-xs">
+                {n(t.advance_paid) > 0 && <div className="flex justify-between"><span className="text-gray-500">Advance to Seller {t.advance_paid_on && <span className="text-gray-300">({fmtDate(t.advance_paid_on)})</span>}</span><span className="font-mono text-red-500">{fmtFull(t.advance_paid)}</span></div>}
+                {n(t.final_payment_paid) > 0 && <div className="flex justify-between"><span className="text-gray-500">Final to Seller {t.final_payment_amount_paid_on && <span className="text-gray-300">({fmtDate(t.final_payment_amount_paid_on)})</span>}</span><span className="font-mono text-red-500">{fmtFull(t.final_payment_paid)}</span></div>}
+                <div className="flex justify-between font-medium"><span className="text-gray-600">Total Paid Out</span><span className="font-mono text-red-600">{fmtFull(t.total_outwards)}</span></div>
+                <div className="border-t border-gray-200 my-1" />
+                {n(t.advance_from_buyer) > 0 && <div className="flex justify-between"><span className="text-gray-500">Advance from Buyer {t.advance_received_on && <span className="text-gray-300">({fmtDate(t.advance_received_on)})</span>}</span><span className="font-mono text-emerald-600">{fmtFull(t.advance_from_buyer)}</span></div>}
+                {n(t.second_payment_from_buyer) > 0 && <div className="flex justify-between"><span className="text-gray-500">2nd from Buyer {t.payment_received_on && <span className="text-gray-300">({fmtDate(t.payment_received_on)})</span>}</span><span className="font-mono text-emerald-600">{fmtFull(t.second_payment_from_buyer)}</span></div>}
+                {n(t.third_payment_from_buyer) > 0 && <div className="flex justify-between"><span className="text-gray-500">3rd from Buyer</span><span className="font-mono text-emerald-600">{fmtFull(t.third_payment_from_buyer)}</span></div>}
+                <div className="flex justify-between font-medium"><span className="text-gray-600">Total Received</span><span className="font-mono text-emerald-700">{fmtFull(t.total_inwards)}</span></div>
+                <div className="border-t border-gray-200 my-1" />
+                {n(t.outward_remaining) > 0 && <div className="flex justify-between"><span className="text-gray-500">Owed to Seller</span><span className="font-mono text-amber-600 font-medium">{fmtFull(t.outward_remaining)}</span></div>}
+                {n(t.inward_remaining) > 0 && <div className="flex justify-between"><span className="text-gray-500">Owed by Buyer</span><span className="font-mono text-amber-600 font-medium">{fmtFull(t.inward_remaining)}</span></div>}
+                {n(t.working_capital_days) > 0 && <div className="flex justify-between"><span className="text-gray-500">Working Capital Days</span><span className="font-mono text-gray-700">{fmt(t.working_capital_days)}d</span></div>}
               </div>
             </div>
           )}
 
           {/* Logistics */}
-          {(trade.bl_number || trade.etd || trade.eta) && (
+          {(has(t.bl_number) || has(t.etd) || has(t.eta)) && (
             <div>
-              <div className="text-[10px] text-zinc-500 uppercase tracking-wider mb-2">Logistics</div>
-              <div className="grid grid-cols-2 gap-3 text-xs">
-                {trade.port_of_loading && <div><span className="text-zinc-500">Port of Loading: </span><span className="text-zinc-300">{trade.port_of_loading}</span></div>}
-                {trade.port_of_discharge && <div><span className="text-zinc-500">Port of Discharge: </span><span className="text-zinc-300">{trade.port_of_discharge}</span></div>}
-                {trade.bl_number && <div><span className="text-zinc-500">B/L Number: </span><span className="text-zinc-300 font-mono">{trade.bl_number}</span></div>}
-                {trade.etd && <div><span className="text-zinc-500">ETD: </span><span className="text-zinc-300">{trade.etd}</span></div>}
-                {trade.eta && <div><span className="text-zinc-500">ETA: </span><span className="text-zinc-300">{trade.eta}</span></div>}
-                {trade.transit_days && <div><span className="text-zinc-500">Transit Days: </span><span className="text-zinc-300">{trade.transit_days}d</span></div>}
+              <h3 className="text-xs font-semibold text-gray-700 mb-2">Logistics</h3>
+              <div className="bg-gray-50 rounded-lg p-4 grid grid-cols-2 gap-2 text-xs">
+                {has(t.port_of_loading) && <div><span className="text-gray-400">Load: </span><span className="text-gray-700">{t.port_of_loading}</span></div>}
+                {has(t.port_of_discharge) && <div><span className="text-gray-400">Discharge: </span><span className="text-gray-700">{t.port_of_discharge}</span></div>}
+                {has(t.bl_number) && <div><span className="text-gray-400">B/L: </span><span className="text-gray-700 font-mono">{t.bl_number}</span></div>}
+                {has(t.bl_date) && <div><span className="text-gray-400">B/L Date: </span><span className="text-gray-700">{fmtDate(t.bl_date)}</span></div>}
+                {has(t.etd) && <div><span className="text-gray-400">ETD: </span><span className="text-gray-700">{fmtDate(t.etd)}</span></div>}
+                {has(t.eta) && <div><span className="text-gray-400">ETA: </span><span className="text-gray-700">{fmtDate(t.eta)}</span></div>}
+                {has(t.transit_days) && <div><span className="text-gray-400">Transit: </span><span className="text-gray-700">{t.transit_days}d</span></div>}
               </div>
             </div>
           )}
 
-          {/* Remarks */}
-          {trade.remarks && (
-            <div>
-              <div className="text-[10px] text-zinc-500 uppercase tracking-wider mb-1">Remarks</div>
-              <p className="text-xs text-zinc-400 bg-zinc-800/30 rounded-lg p-3">{trade.remarks}</p>
+          {/* Contract refs */}
+          {(has(t.contract_reference_number) || has(t.sales_contract_reference_number)) && (
+            <div className="text-xs text-gray-400 space-y-0.5">
+              {has(t.contract_reference_number) && <div>Purchase Contract: {t.contract_reference_number}</div>}
+              {has(t.sales_contract_reference_number) && <div>Sales Contract: {t.sales_contract_reference_number}</div>}
             </div>
           )}
+
+          {t.remarks && <div className="text-xs text-gray-500 bg-gray-50 rounded-lg p-3 italic">{t.remarks}</div>}
         </div>
       </div>
     </div>
   );
 }
 
-// ─── Clickable Deal Card ──────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// DEAL ROW (mobile-friendly card for deal lists)
+// ═══════════════════════════════════════════════════════════════════════════════
 
-function DealCard({ trade, onClick }: { trade: Trade; onClick: () => void }) {
-  const badge = stageBadge(trade.position || "");
-  const netProfit = n(trade.net_profit);
-  const outRem = n(trade.outward_remaining);
-  const inRem = n(trade.inward_remaining);
-  const hasOpenItems = outRem > 0 || inRem > 0;
-
+function DealRow({ trade: t, onClick, showAmount }: { trade: Trade; onClick: () => void; showAmount?: "net_profit" | "purchase_value" | "inward_remaining" | "outward_remaining" }) {
+  const amt = showAmount ? n(t[showAmount]) : null;
   return (
-    <button onClick={onClick} className="w-full text-left bg-zinc-800/30 hover:bg-zinc-800/60 border border-zinc-800 hover:border-zinc-700 rounded-lg px-4 py-3 transition-all group">
-      <div className="flex items-start justify-between mb-1.5">
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-medium text-zinc-200 group-hover:text-white">{trade.product || "—"}</span>
-          <span className={`px-1.5 py-0.5 rounded text-[10px] ${badge.cls}`}>{badge.label}</span>
+    <button onClick={onClick} className="w-full text-left flex items-center gap-3 px-4 py-3 hover:bg-gray-50 border-b border-gray-100 transition-colors group">
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2 mb-0.5">
+          <span className="text-sm font-semibold text-gray-900">{t.product || "—"}</span>
+          {t.trade_no && <span className="text-[11px] text-gray-400 font-mono">{t.commodity_code || t.source_sheet}-{t.trade_no}</span>}
         </div>
-        <span className={`text-sm font-bold font-mono ${netProfit >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-          {fmtCurrency(netProfit)}
-        </span>
+        <div className="text-xs text-gray-500 truncate">
+          {t.seller || "—"} → {t.buyer || <span className="text-amber-600">No buyer</span>}
+        </div>
+        <div className="flex flex-wrap gap-x-3 gap-y-0 text-[11px] text-gray-400 mt-0.5">
+          {has(t.quantity_mt) && <span>{fmt(t.quantity_mt)} MT</span>}
+          {has(t.etd) && <span>ETD {fmtDate(t.etd)}</span>}
+          {has(t.eta) && <span>ETA {fmtDate(t.eta)}</span>}
+          {has(t.origin) && <span>{t.origin}</span>}
+        </div>
       </div>
-      <div className="flex items-center justify-between text-[11px]">
-        <span className="text-zinc-500">
-          {trade.origin || "—"} · {trade.buyer || "No buyer"} · {fmt(trade.quantity_mt)} MT
-        </span>
-        {hasOpenItems && (
-          <span className="text-amber-400/70">
-            {outRem > 0 && `Pay: ${fmtCurrency(outRem)}`}
-            {outRem > 0 && inRem > 0 && " · "}
-            {inRem > 0 && `Recv: ${fmtCurrency(inRem)}`}
-          </span>
-        )}
-      </div>
+      {amt !== null && amt !== 0 && (
+        <div className="text-right shrink-0">
+          <div className={`text-sm font-bold font-mono ${showAmount === "net_profit" ? (amt >= 0 ? "text-emerald-700" : "text-red-600") : "text-gray-900"}`}>{fmtK(amt)}</div>
+          {has(t.eta) && showAmount !== "net_profit" && <div className="text-[10px] text-gray-400">{fmtDate(t.eta)}</div>}
+        </div>
+      )}
+      <svg className="w-4 h-4 text-gray-300 group-hover:text-gray-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
     </button>
   );
 }
 
-// ─── Section header ──────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// PAGES
+// ═══════════════════════════════════════════════════════════════════════════════
 
-function Section({ title, subtitle, children }: { title: string; subtitle?: string; children: React.ReactNode }) {
+// ─── Today's Work ─────────────────────────────────────────────────
+
+function TodaysWorkPage({ trades, stageGroups, onSelect }: {
+  trades: Trade[];
+  stageGroups: Record<DealStage, Trade[]>;
+  onSelect: (t: Trade) => void;
+}) {
+  const [activeStage, setActiveStage] = useState<DealStage | null>(null);
+  const needAttention = trades.filter(t => classifyDeal(t) !== "done");
+
+  // Collecting payment trades needing follow-up
+  const collectingPayment = stageGroups.collecting_payment.filter(t => n(t.inward_remaining) > 0);
+  const outstandingAmount = sumBy(collectingPayment, "inward_remaining");
+
+  // Find ETA range for at_sea
+  const atSeaETAs = stageGroups.at_sea
+    .map(t => t.eta).filter(Boolean)
+    .map(d => new Date(d!))
+    .filter(d => !isNaN(d.getTime()))
+    .sort((a, b) => a.getTime() - b.getTime());
+  const etaRange = atSeaETAs.length > 0
+    ? `ETA ${atSeaETAs[0].toLocaleDateString("en-US", { month: "short" })} – ${atSeaETAs[atSeaETAs.length - 1].toLocaleDateString("en-US", { month: "short" })}`
+    : "";
+
+  const stageDesc: Record<DealStage, string> = {
+    need_buyer: `${fmtK(sumBy(stageGroups.need_buyer, "purchase_value"))} exposure`,
+    collecting_payment: outstandingAmount > 0 ? `${fmtK(outstandingAmount)} outstanding` : "All collected",
+    waiting_to_ship: "B/L not yet issued",
+    at_sea: etaRange,
+    done: "Fully settled",
+  };
+
+  const stages: DealStage[] = ["need_buyer", "collecting_payment", "waiting_to_ship", "at_sea", "done"];
+
+  const visibleTrades = activeStage ? stageGroups[activeStage] : needAttention;
+  const showAmount = activeStage === "collecting_payment" ? "inward_remaining" as const
+    : activeStage === "need_buyer" ? "purchase_value" as const
+    : "net_profit" as const;
+
   return (
     <div>
-      <div className="pt-2 pb-2">
-        <h2 className="text-sm font-semibold text-zinc-200">{title}</h2>
-        {subtitle && <p className="text-[11px] text-zinc-500">{subtitle}</p>}
+      <div className="px-4 sm:px-6 pt-5 pb-3">
+        <h1 className="text-xl font-bold text-gray-900">Today&apos;s Work</h1>
+        <p className="text-sm text-gray-400 mt-0.5">{needAttention.length} trades need attention · updated {new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })}</p>
       </div>
-      {children}
+
+      {/* Stage summary cards */}
+      <div className="px-4 sm:px-6 pb-4 overflow-x-auto">
+        <div className="flex gap-3 min-w-max">
+          {stages.map(stage => {
+            const count = stageGroups[stage].length;
+            const cfg = STAGE_CONFIG[stage];
+            const isActive = activeStage === stage;
+            return (
+              <button key={stage} onClick={() => setActiveStage(isActive ? null : stage)}
+                className={`flex-shrink-0 rounded-xl px-5 py-4 text-left transition-all border ${isActive ? "border-gray-300 bg-white shadow-sm" : "border-gray-100 bg-gray-50 hover:bg-white hover:border-gray-200"}`}
+                style={{ minWidth: 150 }}>
+                <div className={`flex items-center gap-1.5 mb-1`}>
+                  <span className={`w-2 h-2 rounded-full ${cfg.dot}`} />
+                  <span className={`text-[11px] font-medium ${cfg.color}`}>{cfg.label}</span>
+                </div>
+                <div className="text-2xl font-bold text-gray-900">{count}</div>
+                <div className="text-[11px] text-gray-400 mt-0.5">{stageDesc[stage]}</div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Actionable trades */}
+      {!activeStage && collectingPayment.length > 0 && (
+        <div className="border-t border-gray-100">
+          <div className="px-4 sm:px-6 py-3 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="w-1 h-4 bg-amber-500 rounded-full" />
+              <span className="text-sm font-semibold text-gray-700">Collecting Payment</span>
+              <span className="text-xs text-gray-400">{collectingPayment.length} trades</span>
+            </div>
+            <span className="text-sm font-bold text-gray-900">{fmtK(outstandingAmount)}</span>
+          </div>
+          {collectingPayment.map((t, i) => (
+            <DealRow key={t.id || i} trade={t} onClick={() => onSelect(t)} showAmount="inward_remaining" />
+          ))}
+        </div>
+      )}
+
+      {/* Active stage filter list */}
+      {activeStage && (
+        <div className="border-t border-gray-100">
+          <div className="px-4 sm:px-6 py-3 flex items-center gap-2">
+            <span className={`w-1 h-4 rounded-full ${STAGE_CONFIG[activeStage].dot}`} />
+            <span className="text-sm font-semibold text-gray-700">{STAGE_CONFIG[activeStage].label}</span>
+            <span className="text-xs text-gray-400">{visibleTrades.length} trades</span>
+          </div>
+          {visibleTrades.map((t, i) => (
+            <DealRow key={t.id || i} trade={t} onClick={() => onSelect(t)} showAmount={showAmount} />
+          ))}
+        </div>
+      )}
+
+      {/* If no active stage and no collecting payment, show all needing attention */}
+      {!activeStage && collectingPayment.length === 0 && needAttention.length > 0 && (
+        <div className="border-t border-gray-100">
+          {needAttention.slice(0, 20).map((t, i) => (
+            <DealRow key={t.id || i} trade={t} onClick={() => onSelect(t)} showAmount="purchase_value" />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
-// ─── Metric Card ──────────────────────────────────────────────────────────────
+// ─── All Trades / Open Positions ──────────────────────────────────
 
-function Metric({ label, value, color = "text-zinc-200", sub }: { label: string; value: string; color?: string; sub?: string }) {
+function TradesListPage({ trades, title, subtitle, onSelect }: {
+  trades: Trade[];
+  title: string;
+  subtitle: string;
+  onSelect: (t: Trade) => void;
+}) {
+  const [search, setSearch] = useState("");
+  const [sortBy, setSortBy] = useState<"default" | "profit" | "value">("default");
+
+  const filtered = useMemo(() => {
+    let list = [...trades];
+    if (search) {
+      const q = search.toLowerCase();
+      list = list.filter(t =>
+        (t.product || "").toLowerCase().includes(q) ||
+        (t.seller || "").toLowerCase().includes(q) ||
+        (t.buyer || "").toLowerCase().includes(q) ||
+        (t.origin || "").toLowerCase().includes(q) ||
+        (t.trade_no || "").toLowerCase().includes(q)
+      );
+    }
+    if (sortBy === "profit") list.sort((a, b) => n(b.net_profit) - n(a.net_profit));
+    if (sortBy === "value") list.sort((a, b) => n(b.purchase_value) - n(a.purchase_value));
+    return list;
+  }, [trades, search, sortBy]);
+
   return (
-    <div className="bg-zinc-900/60 border border-zinc-800 rounded-lg px-4 py-3">
-      <div className={`text-lg font-bold ${color}`}>{value}</div>
-      <div className="text-[11px] text-zinc-500">{label}</div>
-      {sub && <div className="text-[10px] text-zinc-600 mt-0.5">{sub}</div>}
+    <div>
+      <div className="px-4 sm:px-6 pt-5 pb-3">
+        <h1 className="text-xl font-bold text-gray-900">{title}</h1>
+        <p className="text-sm text-gray-400 mt-0.5">{subtitle}</p>
+      </div>
+      <div className="px-4 sm:px-6 pb-3 flex gap-2">
+        <input type="text" placeholder="Search commodity, seller, buyer..." value={search} onChange={e => setSearch(e.target.value)}
+          className="flex-1 px-3 py-2 text-sm border border-gray-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent" />
+        <select value={sortBy} onChange={e => setSortBy(e.target.value as typeof sortBy)}
+          className="px-3 py-2 text-sm border border-gray-200 rounded-lg bg-white text-gray-600">
+          <option value="default">Default</option>
+          <option value="profit">By Profit</option>
+          <option value="value">By Value</option>
+        </select>
+      </div>
+      <div className="border-t border-gray-100">
+        {filtered.map((t, i) => (
+          <DealRow key={t.id || i} trade={t} onClick={() => onSelect(t)} showAmount="net_profit" />
+        ))}
+        {filtered.length === 0 && <div className="px-6 py-8 text-center text-sm text-gray-400">No trades found</div>}
+      </div>
     </div>
   );
 }
 
-// ─── Main Component ───────────────────────────────────────────────────────────
+// ─── Payments Out ─────────────────────────────────────────────────
+
+function PaymentsOutPage({ trades, onSelect }: { trades: Trade[]; onSelect: (t: Trade) => void }) {
+  const active = trades.filter(t => classifyDeal(t) !== "done");
+
+  // Build payment schedule by supplier by month
+  const scheduleBySupplier = useMemo(() => {
+    const map = new Map<string, { supplier: string; months: Map<string, { amount: number; terms: string; trades: Trade[] }> }>();
+
+    for (const t of active) {
+      const supplier = t.seller || "Unknown";
+      const items = parseSellerPaymentSchedule(t);
+      if (!map.has(supplier)) map.set(supplier, { supplier, months: new Map() });
+      const entry = map.get(supplier)!;
+
+      for (const item of items) {
+        const month = item.dueDate ? monthLabel(item.dueDate) : "TBD";
+        if (!entry.months.has(month)) entry.months.set(month, { amount: 0, terms: "", trades: [] });
+        const m = entry.months.get(month)!;
+        m.amount += item.amount;
+        m.terms = m.terms || item.label;
+        m.trades.push(t);
+      }
+    }
+
+    return [...map.values()].sort((a, b) => {
+      const totalA = [...a.months.values()].reduce((s, m) => s + m.amount, 0);
+      const totalB = [...b.months.values()].reduce((s, m) => s + m.amount, 0);
+      return totalB - totalA;
+    });
+  }, [active]);
+
+  // Get all months
+  const allMonths = useMemo(() => {
+    const months = new Set<string>();
+    for (const s of scheduleBySupplier) {
+      for (const m of s.months.keys()) months.add(m);
+    }
+    return [...months].sort((a, b) => {
+      const da = new Date(a);
+      const db = new Date(b);
+      if (isNaN(da.getTime()) || isNaN(db.getTime())) return a.localeCompare(b);
+      return da.getTime() - db.getTime();
+    });
+  }, [scheduleBySupplier]);
+
+  // Monthly totals
+  const monthTotals = allMonths.map(m => {
+    let total = 0;
+    for (const s of scheduleBySupplier) {
+      total += s.months.get(m)?.amount || 0;
+    }
+    return total;
+  });
+
+  const grandTotal = monthTotals.reduce((s, v) => s + v, 0);
+
+  // Top-level summary: This month, next month, rest
+  const now = new Date();
+  const thisMonth = monthLabel(now);
+  const nextMonthDate = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+  const nextMonth = monthLabel(nextMonthDate);
+
+  const thisMonthTotal = monthTotals[allMonths.indexOf(thisMonth)] || 0;
+  const nextMonthTotal = monthTotals[allMonths.indexOf(nextMonth)] || 0;
+  const restTotal = grandTotal - thisMonthTotal - nextMonthTotal;
+
+  return (
+    <div>
+      <div className="px-4 sm:px-6 pt-5 pb-3">
+        <h1 className="text-xl font-bold text-gray-900">Payments Out</h1>
+        <p className="text-sm text-gray-400 mt-0.5">Supplier payment schedule · Approximate dates from payment terms</p>
+      </div>
+
+      {/* Summary cards */}
+      <div className="px-4 sm:px-6 pb-4 grid grid-cols-3 gap-3">
+        <div className="bg-gray-50 border border-gray-100 rounded-xl px-4 py-3">
+          <div className="text-[10px] text-gray-400 uppercase tracking-wider">Due by end of {thisMonth}</div>
+          <div className="text-xl font-bold text-gray-900 mt-1">{fmtK(thisMonthTotal)}</div>
+          <div className="text-[11px] text-gray-400">Pre-shipment & B/L-triggered</div>
+        </div>
+        <div className="bg-gray-50 border border-gray-100 rounded-xl px-4 py-3">
+          <div className="text-[10px] text-gray-400 uppercase tracking-wider">Due in {nextMonth}</div>
+          <div className="text-xl font-bold text-gray-900 mt-1">{fmtK(nextMonthTotal)}</div>
+          <div className="text-[11px] text-gray-400">On-arrival & document payments</div>
+        </div>
+        <div className="bg-gray-50 border border-gray-100 rounded-xl px-4 py-3">
+          <div className="text-[10px] text-gray-400 uppercase tracking-wider">Later</div>
+          <div className="text-xl font-bold text-gray-900 mt-1">{fmtK(restTotal)}</div>
+          <div className="text-[11px] text-gray-400">Future shipment obligations</div>
+        </div>
+      </div>
+
+      {/* Schedule table */}
+      <div className="px-4 sm:px-6 pb-4">
+        <h2 className="text-sm font-semibold text-gray-700 mb-2">Supplier Payment Schedule <span className="font-normal text-gray-400">By month · Approximate dates from payment terms</span></h2>
+        <div className="border border-gray-200 rounded-xl overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="bg-gray-50 border-b border-gray-200">
+                <th className="px-4 py-2.5 text-left font-semibold text-gray-600">Supplier</th>
+                {allMonths.map(m => <th key={m} className="px-4 py-2.5 text-right font-semibold text-gray-600 whitespace-nowrap">{m}</th>)}
+                <th className="px-4 py-2.5 text-right font-semibold text-gray-600">Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              {scheduleBySupplier.map((s, i) => {
+                const total = [...s.months.values()].reduce((sum, m) => sum + m.amount, 0);
+                return (
+                  <tr key={i} className="border-b border-gray-100 hover:bg-gray-50">
+                    <td className="px-4 py-2.5 font-medium text-gray-900">{s.supplier}</td>
+                    {allMonths.map(m => {
+                      const cell = s.months.get(m);
+                      return (
+                        <td key={m} className="px-4 py-2.5 text-right">
+                          {cell ? (
+                            <div>
+                              <div className="font-bold text-amber-700">{fmtK(cell.amount)}</div>
+                              <div className="text-[10px] text-gray-400">{cell.terms}</div>
+                            </div>
+                          ) : null}
+                        </td>
+                      );
+                    })}
+                    <td className="px-4 py-2.5 text-right font-bold text-gray-900">{fmtK(total)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+            <tfoot>
+              <tr className="bg-gray-900 text-white">
+                <td className="px-4 py-2.5 font-semibold">Total</td>
+                {monthTotals.map((t, i) => <td key={i} className="px-4 py-2.5 text-right font-bold">{fmtK(t)}</td>)}
+                <td className="px-4 py-2.5 text-right font-bold">{fmtK(grandTotal)}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+        <p className="text-[11px] text-gray-400 mt-2">
+          Payment dates are approximated from payment term logic (CAD = on ETD, TT-15d = ETA minus 15 days, DP = on arrival, split terms prorated). Confirm exact due dates with the ops team.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ─── Payments In ──────────────────────────────────────────────────
+
+function PaymentsInPage({ trades, onSelect }: { trades: Trade[]; onSelect: (t: Trade) => void }) {
+  const active = trades.filter(t => classifyDeal(t) !== "done");
+
+  const scheduleByBuyer = useMemo(() => {
+    const map = new Map<string, { buyer: string; months: Map<string, { amount: number; terms: string; trades: Trade[] }> }>();
+
+    for (const t of active) {
+      if (!has(t.buyer)) continue;
+      const buyer = t.buyer!;
+      const items = parseBuyerPaymentSchedule(t);
+      if (!map.has(buyer)) map.set(buyer, { buyer, months: new Map() });
+      const entry = map.get(buyer)!;
+
+      for (const item of items) {
+        const month = item.dueDate ? monthLabel(item.dueDate) : "TBD";
+        if (!entry.months.has(month)) entry.months.set(month, { amount: 0, terms: "", trades: [] });
+        const m = entry.months.get(month)!;
+        m.amount += item.amount;
+        m.terms = m.terms || item.label;
+        m.trades.push(t);
+      }
+    }
+
+    return [...map.values()].sort((a, b) => {
+      const totalA = [...a.months.values()].reduce((s, m) => s + m.amount, 0);
+      const totalB = [...b.months.values()].reduce((s, m) => s + m.amount, 0);
+      return totalB - totalA;
+    });
+  }, [active]);
+
+  const allMonths = useMemo(() => {
+    const months = new Set<string>();
+    for (const s of scheduleByBuyer) {
+      for (const m of s.months.keys()) months.add(m);
+    }
+    return [...months].sort((a, b) => {
+      const da = new Date(a);
+      const db = new Date(b);
+      if (isNaN(da.getTime()) || isNaN(db.getTime())) return a.localeCompare(b);
+      return da.getTime() - db.getTime();
+    });
+  }, [scheduleByBuyer]);
+
+  const monthTotals = allMonths.map(m => {
+    let total = 0;
+    for (const s of scheduleByBuyer) {
+      total += s.months.get(m)?.amount || 0;
+    }
+    return total;
+  });
+
+  const grandTotal = monthTotals.reduce((s, v) => s + v, 0);
+
+  return (
+    <div>
+      <div className="px-4 sm:px-6 pt-5 pb-3">
+        <h1 className="text-xl font-bold text-gray-900">Payments In</h1>
+        <p className="text-sm text-gray-400 mt-0.5">Expected buyer receipts · Approximate dates from payment terms</p>
+      </div>
+
+      <div className="px-4 sm:px-6 pb-4">
+        <div className="border border-gray-200 rounded-xl overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="bg-gray-50 border-b border-gray-200">
+                <th className="px-4 py-2.5 text-left font-semibold text-gray-600">Buyer</th>
+                {allMonths.map(m => <th key={m} className="px-4 py-2.5 text-right font-semibold text-gray-600 whitespace-nowrap">{m}</th>)}
+                <th className="px-4 py-2.5 text-right font-semibold text-gray-600">Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              {scheduleByBuyer.map((s, i) => {
+                const total = [...s.months.values()].reduce((sum, m) => sum + m.amount, 0);
+                return (
+                  <tr key={i} className="border-b border-gray-100 hover:bg-gray-50">
+                    <td className="px-4 py-2.5 font-medium text-gray-900">{s.buyer}</td>
+                    {allMonths.map(m => {
+                      const cell = s.months.get(m);
+                      return (
+                        <td key={m} className="px-4 py-2.5 text-right">
+                          {cell ? (
+                            <div>
+                              <div className="font-bold text-emerald-700">{fmtK(cell.amount)}</div>
+                              <div className="text-[10px] text-gray-400">{cell.terms}</div>
+                            </div>
+                          ) : null}
+                        </td>
+                      );
+                    })}
+                    <td className="px-4 py-2.5 text-right font-bold text-gray-900">{fmtK(total)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+            <tfoot>
+              <tr className="bg-gray-900 text-white">
+                <td className="px-4 py-2.5 font-semibold">Total</td>
+                {monthTotals.map((t, i) => <td key={i} className="px-4 py-2.5 text-right font-bold">{fmtK(t)}</td>)}
+                <td className="px-4 py-2.5 text-right font-bold">{fmtK(grandTotal)}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+        <p className="text-[11px] text-gray-400 mt-2">
+          Receipt dates are approximated from buyer payment terms (On Delivery = ETA+1d, CAD = ETA, DP = ETA, TT on BL = BL+3-5d). Confirm with operations.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ─── P&L Page ─────────────────────────────────────────────────────
+
+function PnLPage({ trades }: { trades: Trade[] }) {
+  const settled = trades.filter(t => classifyDeal(t) === "done");
+
+  const totalSales = sumBy(settled, "sales_value");
+  const totalPurchase = sumBy(settled, "purchase_value");
+  const totalGrossMargin = sumBy(settled, "gross_margin");
+  const totalNetProfit = sumBy(settled, "net_profit");
+  const netMarginPct = totalSales > 0 ? (totalNetProfit / totalSales * 100).toFixed(2) : "0";
+
+  // By product
+  const byProduct = useMemo(() => {
+    const map = new Map<string, { product: string; trades: number; containers: number; mt: number; purchase: number; sales: number; grossMargin: number; netProfit: number }>();
+    for (const t of settled) {
+      const p = t.product || "Other";
+      if (!map.has(p)) map.set(p, { product: p, trades: 0, containers: 0, mt: 0, purchase: 0, sales: 0, grossMargin: 0, netProfit: 0 });
+      const e = map.get(p)!;
+      e.trades++;
+      e.containers += n(t.no_of_containers);
+      e.mt += n(t.quantity_mt);
+      e.purchase += n(t.purchase_value);
+      e.sales += n(t.sales_value);
+      e.grossMargin += n(t.gross_margin);
+      e.netProfit += n(t.net_profit);
+    }
+    return [...map.values()].sort((a, b) => b.sales - a.sales);
+  }, [settled]);
+
+  // Expense breakdown
+  const clearanceTotal = sumBy(settled, "clearance_charges");
+  const brokerageTotal = sumBy(settled, "brokerage");
+  const interestTotal = sumBy(settled, "interest_loss") + sumBy(settled, "warehouse_loss") + sumBy(settled, "claims_paid") - sumBy(settled, "claims_received");
+  const maxExpense = Math.max(clearanceTotal, brokerageTotal, Math.abs(interestTotal), 1);
+
+  // Date range
+  const months = settled.map(t => t.month).filter(Boolean);
+  const dateRange = months.length > 0 ? `${months[0]} – ${months[months.length - 1]}` : "All time";
+
+  return (
+    <div>
+      <div className="px-4 sm:px-6 pt-5 pb-3">
+        <h1 className="text-xl font-bold text-gray-900">P&L</h1>
+        <p className="text-sm text-gray-400 mt-0.5">{settled.length} settled trades · {dateRange}</p>
+      </div>
+
+      {/* Summary cards */}
+      <div className="px-4 sm:px-6 pb-4 grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div className="bg-gray-50 border border-gray-100 rounded-xl px-4 py-3">
+          <div className="text-[10px] text-gray-400 uppercase tracking-wider">Sales Value</div>
+          <div className="text-xl font-bold text-gray-900 mt-1">{fmtK(totalSales)}</div>
+          <div className="text-[11px] text-gray-400">{settled.length} settled trades</div>
+        </div>
+        <div className="bg-gray-50 border border-gray-100 rounded-xl px-4 py-3">
+          <div className="text-[10px] text-gray-400 uppercase tracking-wider">Purchase Value</div>
+          <div className="text-xl font-bold text-gray-900 mt-1">{fmtK(totalPurchase)}</div>
+          <div className="text-[11px] text-gray-400">Cost of goods sold</div>
+        </div>
+        <div className="bg-gray-50 border border-gray-100 rounded-xl px-4 py-3">
+          <div className="text-[10px] text-gray-400 uppercase tracking-wider">Net Profit</div>
+          <div className={`text-xl font-bold mt-1 ${totalNetProfit >= 0 ? "text-emerald-700" : "text-red-600"}`}>{fmtFull(totalNetProfit)}</div>
+          <div className="text-[11px] text-gray-400">After all expenses</div>
+        </div>
+        <div className="bg-gray-50 border border-gray-100 rounded-xl px-4 py-3">
+          <div className="text-[10px] text-gray-400 uppercase tracking-wider">Net Margin</div>
+          <div className={`text-xl font-bold mt-1 ${totalNetProfit >= 0 ? "text-emerald-700" : "text-red-600"}`}>{netMarginPct}%</div>
+          <div className="text-[11px] text-gray-400">Range {byProduct.length > 0 ? `${Math.min(...byProduct.map(p => p.sales > 0 ? p.netProfit / p.sales * 100 : 0)).toFixed(1)}–${Math.max(...byProduct.map(p => p.sales > 0 ? p.netProfit / p.sales * 100 : 0)).toFixed(1)}%` : "—"} by product</div>
+        </div>
+      </div>
+
+      {/* By product table */}
+      <div className="px-4 sm:px-6 pb-4">
+        <h2 className="text-sm font-semibold text-gray-700 mb-2">By Product <span className="font-normal text-gray-400">{settled.length} settled trades · {dateRange}</span></h2>
+        <div className="border border-gray-200 rounded-xl overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="bg-gray-50 border-b border-gray-200">
+                <th className="px-4 py-2.5 text-left font-semibold text-gray-600">Product</th>
+                <th className="px-4 py-2.5 text-right font-semibold text-gray-600">Trades</th>
+                <th className="px-4 py-2.5 text-right font-semibold text-gray-600">Ctns</th>
+                <th className="px-4 py-2.5 text-right font-semibold text-gray-600">MT</th>
+                <th className="px-4 py-2.5 text-right font-semibold text-gray-600">Purchase ($)</th>
+                <th className="px-4 py-2.5 text-right font-semibold text-gray-600">Sales ($)</th>
+                <th className="px-4 py-2.5 text-right font-semibold text-gray-600">Gross Margin</th>
+                <th className="px-4 py-2.5 text-right font-semibold text-gray-600">Net Profit</th>
+                <th className="px-4 py-2.5 text-right font-semibold text-gray-600">Margin %</th>
+              </tr>
+            </thead>
+            <tbody>
+              {byProduct.map((p, i) => (
+                <tr key={i} className="border-b border-gray-100 hover:bg-gray-50">
+                  <td className="px-4 py-2.5 font-semibold text-gray-900">{p.product}</td>
+                  <td className="px-4 py-2.5 text-right text-gray-600">{p.trades}</td>
+                  <td className="px-4 py-2.5 text-right text-gray-600">{fmt(p.containers)}</td>
+                  <td className="px-4 py-2.5 text-right text-gray-600">{fmt(p.mt)}</td>
+                  <td className="px-4 py-2.5 text-right text-gray-600">{fmtK(p.purchase)}</td>
+                  <td className="px-4 py-2.5 text-right text-gray-600">{fmtK(p.sales)}</td>
+                  <td className="px-4 py-2.5 text-right text-gray-600">{fmtK(p.grossMargin)}</td>
+                  <td className={`px-4 py-2.5 text-right font-bold ${p.netProfit >= 0 ? "text-emerald-700" : "text-red-600"}`}>{fmtK(p.netProfit)}</td>
+                  <td className="px-4 py-2.5 text-right text-gray-600">{p.sales > 0 ? (p.netProfit / p.sales * 100).toFixed(2) + "%" : "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr className="bg-gray-900 text-white">
+                <td className="px-4 py-2.5 font-semibold">Total</td>
+                <td className="px-4 py-2.5 text-right font-bold">{settled.length}</td>
+                <td className="px-4 py-2.5 text-right font-bold">{fmt(byProduct.reduce((s, p) => s + p.containers, 0))}</td>
+                <td className="px-4 py-2.5 text-right font-bold">{fmt(byProduct.reduce((s, p) => s + p.mt, 0))}</td>
+                <td className="px-4 py-2.5 text-right font-bold">{fmtK(totalPurchase)}</td>
+                <td className="px-4 py-2.5 text-right font-bold">{fmtK(totalSales)}</td>
+                <td className="px-4 py-2.5 text-right font-bold">{fmtK(totalGrossMargin)}</td>
+                <td className="px-4 py-2.5 text-right font-bold">{fmtK(totalNetProfit)}</td>
+                <td className="px-4 py-2.5 text-right font-bold">{netMarginPct}%</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      </div>
+
+      {/* Expense Breakdown */}
+      <div className="px-4 sm:px-6 pb-6">
+        <h2 className="text-sm font-semibold text-gray-700 mb-2">Expense Breakdown <span className="font-normal text-gray-400">What reduces gross margin to net</span></h2>
+        <div className="space-y-3">
+          {[
+            { label: "Clearance Charges", val: clearanceTotal },
+            { label: "Brokerage", val: brokerageTotal },
+            { label: "Interest & Other", val: interestTotal },
+          ].filter(e => e.val !== 0).map(({ label, val }) => (
+            <div key={label} className="flex items-center gap-3">
+              <span className="w-36 text-xs text-gray-600 shrink-0">{label}</span>
+              <div className="flex-1 h-6 bg-gray-100 rounded overflow-hidden">
+                <div className="h-full bg-teal-600 rounded" style={{ width: `${Math.max(4, Math.abs(val) / maxExpense * 100)}%` }} />
+              </div>
+              <span className="w-16 text-xs font-bold text-gray-900 text-right shrink-0">{fmtK(Math.abs(val))}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MAIN COMPONENT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const NAV_ITEMS: { page: Page; label: string; section: string; icon: string }[] = [
+  { page: "today", label: "Today's Work", section: "OVERVIEW", icon: "📋" },
+  { page: "all_trades", label: "All Trades", section: "SHIPMENTS", icon: "📦" },
+  { page: "open_positions", label: "Open Positions", section: "SHIPMENTS", icon: "🔓" },
+  { page: "payments_out", label: "Payments Out", section: "PAYMENTS", icon: "💸" },
+  { page: "payments_in", label: "Payments In", section: "PAYMENTS", icon: "💰" },
+  { page: "pnl", label: "P&L", section: "ANALYSIS", icon: "📊" },
+];
 
 export default function ControlTower() {
   const [trades, setTrades] = useState<Trade[]>([]);
@@ -422,9 +1081,8 @@ export default function ControlTower() {
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [selectedDeal, setSelectedDeal] = useState<Trade | null>(null);
-  const [expandedSection, setExpandedSection] = useState<string | null>(null);
-
-  const toggleSection = (id: string) => setExpandedSection(prev => prev === id ? null : id);
+  const [activePage, setActivePage] = useState<Page>("today");
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   // ─── Fetch ──────────────────────────────────────────────────────
 
@@ -463,511 +1121,159 @@ export default function ControlTower() {
     const stale = trades.length === 0 || !syncStatus || (Date.now() - new Date(syncStatus.synced_at).getTime() > 5 * 60 * 1000);
     if (stale) triggerSync();
   }, [loading, trades.length, syncStatus]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => {
-    if (trades.length === 0) return;
-    const id = setInterval(() => { fetchTrades(); fetchSyncStatus(); }, 60_000);
-    return () => clearInterval(id);
-  }, [trades.length, fetchTrades, fetchSyncStatus]);
 
-  // ─── Analytics ──────────────────────────────────────────────────
+  // ─── Stage Groups ──────────────────────────────────────────────
 
-  const a = useMemo(() => {
-    if (trades.length === 0) return null;
-
-    // Stage classification
-    const completed = trades.filter(t => positionStage(t.position ?? "") === "completed");
-    const atPort = trades.filter(t => positionStage(t.position ?? "") === "at_port");
-    const open = trades.filter(t => positionStage(t.position ?? "") === "open");
-    const active = [...open, ...atPort]; // all non-completed
-
-    // ── Company Health KPIs ──
-    const totalPurchase = sumBy(trades, "purchase_value");
-    const totalSales = sumBy(trades, "sales_value");
-    const totalGrossMargin = sumBy(trades, "gross_margin");
-    const totalNetProfit = sumBy(trades, "net_profit");
-    const totalExpenses = sumBy(trades, "total_expenses");
-    const totalOutwards = sumBy(trades, "total_outwards");
-    const totalInwards = sumBy(trades, "total_inwards");
-    const outwardRemaining = sumBy(active, "outward_remaining");
-    const inwardRemaining = sumBy(active, "inward_remaining");
-    const netCash = totalInwards - totalOutwards;
-
-    // Completed deals margin analysis
-    const completedGrossMargin = sumBy(completed, "gross_margin");
-    const completedNetProfit = sumBy(completed, "net_profit");
-    const completedSales = sumBy(completed, "sales_value");
-    const completedMarginPct = completedSales > 0 ? (completedNetProfit / completedSales) * 100 : 0;
-
-    // Active deals value at risk
-    const activePurchaseValue = sumBy(active, "purchase_value");
-    const activeSalesValue = sumBy(active, "sales_value");
-    const activeExpectedProfit = sumBy(active, "net_profit");
-
-    // Working capital
-    const wcDays = active.map(t => n(t.working_capital_days)).filter(d => d > 0);
-    const avgWcDays = wcDays.length > 0 ? wcDays.reduce((a, b) => a + b, 0) / wcDays.length : 0;
-
-    // ── Risk Signals ──
-    // Deals with negative profit
-    const losingDeals = active.filter(t => n(t.net_profit) < 0);
-    const totalLoss = losingDeals.reduce((s, t) => s + n(t.net_profit), 0);
-
-    // Overdue receivables (at_port deals with open receivables — money should be in already)
-    const overdueReceivables = atPort.filter(t => n(t.inward_remaining) > 0);
-    const overdueReceivableAmount = sumBy(overdueReceivables, "inward_remaining");
-
-    // Large open payables
-    const openPayables = active.filter(t => n(t.outward_remaining) > 0).sort((a, b) => n(b.outward_remaining) - n(a.outward_remaining));
-    const openReceivables = active.filter(t => n(t.inward_remaining) > 0).sort((a, b) => n(b.inward_remaining) - n(a.inward_remaining));
-
-    // Concentration by value
-    const buyerExposure = groupSum(active, "buyer", "sales_value");
-    const sellerExposure = groupSum(active, "seller", "purchase_value");
-    const commodityExposure = groupSum(active, "product", "purchase_value");
-    const originExposure = groupSum(active, "origin", "purchase_value");
-
-    const topBuyer = buyerExposure[0];
-    const topSeller = sellerExposure[0];
-    const topBuyerPct = topBuyer && activeSalesValue > 0 ? (topBuyer[1] / activeSalesValue) * 100 : 0;
-    const topSellerPct = topSeller && activePurchaseValue > 0 ? (topSeller[1] / activePurchaseValue) * 100 : 0;
-
-    // ── P&L by Commodity ──
-    const profitByCommodity = groupSum(trades, "product", "net_profit");
-
-    // ── P&L Heatmap ──
-    const products = [...new Set(trades.map(t => t.product).filter(Boolean))] as string[];
-    const origins = [...new Set(trades.map(t => t.origin).filter(Boolean))] as string[];
-    const topProducts = profitByCommodity.slice(0, 6).map(([n]) => n);
-    const topOrigins = groupSum(trades, "origin", "purchase_value").slice(0, 6).map(([n]) => n);
-    const heatmap = topProducts.map(p =>
-      topOrigins.map(o => {
-        const matching = trades.filter(t => t.product === p && t.origin === o);
-        return { count: matching.length, profit: matching.reduce((s, t) => s + n(t.net_profit), 0) };
-      })
-    );
-
-    // ── Expense breakdown (all trades) ──
-    const expenseBreakdown = [
-      { label: "Clearance Charges", val: sumBy(trades, "clearance_charges") },
-      { label: "Brokerage", val: sumBy(trades, "brokerage") },
-      { label: "Warehouse Loss", val: sumBy(trades, "warehouse_loss") },
-      { label: "Claims Paid", val: sumBy(trades, "claims_paid") },
-      { label: "Claims Received", val: sumBy(trades, "claims_received") },
-      { label: "Interest Loss", val: sumBy(trades, "interest_loss") },
-    ].filter(e => e.val !== 0);
-
-    // Working capital distribution
-    const wcBuckets = [
-      { label: "0–30d", count: wcDays.filter(d => d <= 30).length },
-      { label: "31–60d", count: wcDays.filter(d => d > 30 && d <= 60).length },
-      { label: "61–90d", count: wcDays.filter(d => d > 60 && d <= 90).length },
-      { label: "90d+", count: wcDays.filter(d => d > 90).length },
-    ].filter(b => b.count > 0);
-
-    return {
-      completed, atPort, open, active, trades,
-      totalPurchase, totalSales, totalGrossMargin, totalNetProfit, totalExpenses,
-      totalOutwards, totalInwards, outwardRemaining, inwardRemaining, netCash,
-      completedGrossMargin, completedNetProfit, completedSales, completedMarginPct,
-      activePurchaseValue, activeSalesValue, activeExpectedProfit,
-      avgWcDays, losingDeals, totalLoss,
-      overdueReceivables, overdueReceivableAmount,
-      openPayables, openReceivables,
-      buyerExposure, sellerExposure, commodityExposure, originExposure,
-      topBuyer, topSeller, topBuyerPct, topSellerPct,
-      profitByCommodity, heatmap, topProducts, topOrigins,
-      expenseBreakdown, wcBuckets,
-      products, origins,
+  const stageGroups = useMemo(() => {
+    const groups: Record<DealStage, Trade[]> = {
+      need_buyer: [], collecting_payment: [], waiting_to_ship: [], at_sea: [], done: [],
     };
+    for (const t of trades) {
+      groups[classifyDeal(t)].push(t);
+    }
+    return groups;
   }, [trades]);
 
-  // ═══════════════════════════════════════════════════════════════
-  // RENDER
-  // ═══════════════════════════════════════════════════════════════
+  // Portfolio metrics
+  const totalPortfolio = sumBy(trades, "purchase_value");
+  const totalNetProfit = sumBy(trades.filter(t => classifyDeal(t) === "done"), "net_profit");
+  const openExposure = sumBy(trades.filter(t => classifyDeal(t) === "need_buyer"), "purchase_value");
+
+  const openPositions = trades.filter(t => classifyDeal(t) !== "done");
+  const needAttentionCount = openPositions.length;
+
+  function handlePageChange(page: Page) {
+    setActivePage(page);
+    setMobileMenuOpen(false);
+  }
+
+  // ─── Render ─────────────────────────────────────────────────────
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100">
-      {/* Deal Drilldown Modal */}
+    <div className="min-h-screen bg-white text-gray-900 flex flex-col sm:flex-row">
+      {/* Deal Modal */}
       {selectedDeal && <DealModal trade={selectedDeal} onClose={() => setSelectedDeal(null)} />}
 
-      {/* Header */}
-      <header className="border-b border-zinc-800 bg-zinc-900/50 backdrop-blur-sm sticky top-0 z-10">
-        <div className="max-w-[1400px] mx-auto px-6 py-3 flex items-center justify-between">
-          <div>
-            <h1 className="text-lg font-bold tracking-tight">Hectar Control Tower</h1>
-            <p className="text-[11px] text-zinc-500">Commodity Trading & Risk Management</p>
-          </div>
-          <div className="flex items-center gap-4">
-            {syncStatus && (
-              <span className="text-[11px] text-zinc-600">
-                Synced {timeAgo(syncStatus.synced_at)} · {syncStatus.total_rows} rows
-              </span>
-            )}
-            <button onClick={triggerSync} disabled={syncing}
-              className="px-3 py-1 text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded border border-zinc-700 transition-colors disabled:opacity-50">
-              {syncing ? "Syncing..." : "Refresh"}
-            </button>
-            {trades.length > 0 && (
-              <div className="flex items-center gap-1.5">
-                <div className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
-                <span className="text-[11px] text-zinc-400">Live</span>
-              </div>
-            )}
-          </div>
+      {/* Mobile Header */}
+      <header className="sm:hidden sticky top-0 z-20 bg-white border-b border-gray-100 px-4 py-3 flex items-center justify-between">
+        <button onClick={() => setMobileMenuOpen(!mobileMenuOpen)} className="text-gray-500 p-1">
+          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" /></svg>
+        </button>
+        <div className="text-center">
+          <h1 className="text-sm font-bold">Hectar</h1>
         </div>
+        <button onClick={triggerSync} disabled={syncing} className="text-xs text-gray-400 hover:text-gray-600">
+          {syncing ? "..." : "↻ Refresh"}
+        </button>
       </header>
 
-      <main className="max-w-[1400px] mx-auto px-6 py-5 space-y-5">
+      {/* Mobile menu overlay */}
+      {mobileMenuOpen && (
+        <div className="sm:hidden fixed inset-0 z-30 bg-black/20" onClick={() => setMobileMenuOpen(false)}>
+          <nav className="bg-white w-64 h-full shadow-xl p-4" onClick={e => e.stopPropagation()}>
+            <div className="mb-6">
+              <h1 className="text-lg font-bold text-gray-900">Hectar</h1>
+              <p className="text-[11px] text-gray-400 uppercase tracking-wider">Operations</p>
+            </div>
+            {NAV_ITEMS.map((item, i, arr) => {
+              const showSection = i === 0 || arr[i - 1].section !== item.section;
+              return (
+                <div key={item.page}>
+                  {showSection && <div className="text-[10px] text-gray-400 uppercase tracking-wider mt-4 mb-1 px-2">{item.section}</div>}
+                  <button onClick={() => handlePageChange(item.page)}
+                    className={`w-full text-left px-3 py-2 rounded-lg text-sm flex items-center justify-between ${activePage === item.page ? "bg-blue-50 text-blue-700 font-medium" : "text-gray-600 hover:bg-gray-50"}`}>
+                    <span>{item.label}</span>
+                    {item.page === "today" && <span className="text-xs text-gray-400">{needAttentionCount}</span>}
+                    {item.page === "all_trades" && <span className="text-xs text-gray-400">{trades.length}</span>}
+                    {item.page === "open_positions" && <span className="text-xs text-gray-400">{openPositions.length}</span>}
+                  </button>
+                </div>
+              );
+            })}
+          </nav>
+        </div>
+      )}
+
+      {/* Desktop Sidebar */}
+      <aside className="hidden sm:flex sm:flex-col sm:w-52 lg:w-56 border-r border-gray-100 bg-gray-50/50 min-h-screen sticky top-0 shrink-0">
+        <div className="px-5 pt-5 pb-4">
+          <h1 className="text-lg font-bold text-gray-900">Hectar</h1>
+          <p className="text-[10px] text-gray-400 uppercase tracking-wider">Operations</p>
+        </div>
+
+        <nav className="flex-1 px-3 space-y-0.5">
+          {NAV_ITEMS.map((item, i, arr) => {
+            const showSection = i === 0 || arr[i - 1].section !== item.section;
+            return (
+              <div key={item.page}>
+                {showSection && <div className="text-[10px] text-gray-400 uppercase tracking-wider mt-4 mb-1 px-2">{item.section}</div>}
+                <button onClick={() => setActivePage(item.page)}
+                  className={`w-full text-left px-3 py-2 rounded-lg text-sm flex items-center justify-between transition-colors ${activePage === item.page ? "bg-white text-blue-700 font-medium shadow-sm border border-gray-200" : "text-gray-600 hover:bg-white hover:text-gray-900"}`}>
+                  <span>{item.label}</span>
+                  {item.page === "today" && <span className={`text-xs ${activePage === item.page ? "text-blue-500" : "text-gray-400"}`}>{needAttentionCount}</span>}
+                  {item.page === "all_trades" && <span className="text-xs text-gray-400">{trades.length}</span>}
+                  {item.page === "open_positions" && <span className="text-xs text-gray-400">{openPositions.length}</span>}
+                </button>
+              </div>
+            );
+          })}
+        </nav>
+
+        {/* Sidebar footer stats */}
+        <div className="px-5 py-4 border-t border-gray-100 space-y-1.5 text-xs">
+          <div className="flex justify-between"><span className="text-gray-400">Portfolio</span><span className="font-semibold text-gray-900">{fmtK(totalPortfolio)}</span></div>
+          <div className="flex justify-between"><span className="text-gray-400">Net Profit (YTD)</span><span className={`font-semibold ${totalNetProfit >= 0 ? "text-emerald-700" : "text-red-600"}`}>{fmtK(totalNetProfit)}</span></div>
+          <div className="flex justify-between"><span className="text-gray-400">Open Exposure</span><span className="font-semibold text-gray-900">{fmtK(openExposure)}</span></div>
+          <div className="text-[10px] text-gray-300 mt-2">{new Date().toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" })}</div>
+        </div>
+      </aside>
+
+      {/* Main content */}
+      <main className="flex-1 min-w-0">
+        {/* Desktop top bar */}
+        <div className="hidden sm:flex items-center justify-end px-6 py-3 border-b border-gray-100">
+          {syncStatus && <span className="text-[11px] text-gray-400 mr-3">updated {timeAgo(syncStatus.synced_at)}</span>}
+          <button onClick={triggerSync} disabled={syncing}
+            className="px-3 py-1.5 text-xs border border-gray-200 rounded-lg text-gray-600 hover:bg-gray-50 transition-colors disabled:opacity-50">
+            {syncing ? "Syncing..." : "↻ Refresh"}
+          </button>
+        </div>
+
+        {/* Error */}
+        {error && (
+          <div className="mx-4 sm:mx-6 mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700">{error}</div>
+        )}
+
         {/* Loading */}
         {loading && (
-          <div className="space-y-4">
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              {[1, 2, 3, 4].map(i => (
-                <div key={i} className="rounded-lg border border-zinc-800 bg-zinc-900/30 p-4 animate-pulse">
-                  <div className="h-7 bg-zinc-800 rounded w-16 mb-1.5" />
-                  <div className="h-3 bg-zinc-800/50 rounded w-20" />
-                </div>
-              ))}
-            </div>
-            <div className="text-center text-sm text-zinc-500 py-2">Loading...</div>
+          <div className="px-6 py-16 text-center">
+            <div className="text-sm text-gray-400">Loading trades...</div>
           </div>
         )}
 
-        {/* Empty */}
+        {/* Empty state */}
         {!loading && trades.length === 0 && !error && (
-          <div className="max-w-md mx-auto py-16 text-center space-y-5">
-            <h2 className="text-lg font-semibold">Ready to sync</h2>
-            <p className="text-sm text-zinc-400">Pull the latest data from your Excel spreadsheet.</p>
+          <div className="px-6 py-16 text-center space-y-4">
+            <h2 className="text-lg font-semibold text-gray-900">Ready to sync</h2>
+            <p className="text-sm text-gray-400">Pull the latest data from your Excel spreadsheet.</p>
             <button onClick={triggerSync} disabled={syncing}
-              className="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:bg-zinc-700 text-white text-sm font-medium rounded-lg transition-colors">
+              className="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 text-white text-sm font-medium rounded-lg transition-colors">
               {syncing ? "Syncing..." : "Run First Sync"}
             </button>
           </div>
         )}
 
-        {/* Error */}
-        {error && (
-          <div className="p-3 bg-red-900/20 border border-red-800 rounded-lg text-xs text-red-400">{error}</div>
-        )}
-
-        {/* ═══ INSIGHTS DASHBOARD ═══ */}
-        {a && (
+        {/* Pages */}
+        {trades.length > 0 && (
           <>
-            {/* ═══ 1. PORTFOLIO HEALTH AT A GLANCE ═══ */}
-            <div className="grid grid-cols-3 gap-3">
-              <div className="rounded-xl border border-amber-800/30 bg-gradient-to-br from-amber-950/20 to-zinc-900/60 px-5 py-4">
-                <div className="flex items-center gap-2 mb-2">
-                  <div className="h-2.5 w-2.5 rounded-full bg-amber-500" />
-                  <span className="text-xs text-amber-300/70">Active Deals</span>
-                </div>
-                <div className="text-3xl font-bold text-amber-400">{a.open.length}</div>
-                <div className="text-[11px] text-zinc-500 mt-1">
-                  {fmtCurrency(a.activePurchaseValue)} deployed · {fmtCurrency(a.activeExpectedProfit)} expected P&L
-                </div>
-              </div>
-              <div className="rounded-xl border border-blue-800/30 bg-gradient-to-br from-blue-950/20 to-zinc-900/60 px-5 py-4">
-                <div className="flex items-center gap-2 mb-2">
-                  <div className="h-2.5 w-2.5 rounded-full bg-blue-500" />
-                  <span className="text-xs text-blue-300/70">At Port (Sold)</span>
-                </div>
-                <div className="text-3xl font-bold text-blue-400">{a.atPort.length}</div>
-                <div className="text-[11px] text-zinc-500 mt-1">
-                  Financial close in progress · {a.overdueReceivables.length > 0 && <span className="text-amber-400">{a.overdueReceivables.length} with open receivables</span>}
-                  {a.overdueReceivables.length === 0 && "All collections on track"}
-                </div>
-              </div>
-              <div className="rounded-xl border border-zinc-800 bg-gradient-to-br from-zinc-900/60 to-zinc-900/30 px-5 py-4">
-                <div className="flex items-center gap-2 mb-2">
-                  <div className="h-2.5 w-2.5 rounded-full bg-zinc-600" />
-                  <span className="text-xs text-zinc-500">Completed</span>
-                </div>
-                <div className="text-3xl font-bold text-zinc-500">{a.completed.length}</div>
-                <div className="text-[11px] text-zinc-600 mt-1">
-                  Realized margin: {a.completedMarginPct.toFixed(1)}% · {fmtCurrency(a.completedNetProfit)} net
-                </div>
-              </div>
-            </div>
-
-            {/* ═══ 2. FINANCIAL HEALTH KPIs ═══ */}
-            <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
-              <Metric label="Total Revenue" value={fmtCurrency(a.totalSales)} color="text-emerald-400" />
-              <Metric label="Net Profit" value={fmtCurrency(a.totalNetProfit)} color={a.totalNetProfit >= 0 ? "text-emerald-400" : "text-red-400"} sub={`${pctStr(a.totalNetProfit, a.totalSales)} margin`} />
-              <Metric label="Net Cash Position" value={fmtCurrency(a.netCash)} color={a.netCash >= 0 ? "text-emerald-400" : "text-red-400"} />
-              <Metric label="Open Payables" value={fmtCurrency(a.outwardRemaining)} color="text-red-400" sub={`${a.openPayables.length} deals`} />
-              <Metric label="Open Receivables" value={fmtCurrency(a.inwardRemaining)} color="text-amber-400" sub={`${a.openReceivables.length} deals`} />
-              <Metric label="Avg WC Days" value={a.avgWcDays > 0 ? `${Math.round(a.avgWcDays)}d` : "—"} color="text-zinc-300" />
-            </div>
-
-            {/* ═══ 3. RISK ALERTS ═══ */}
-            {(a.losingDeals.length > 0 || a.overdueReceivables.length > 0 || a.topBuyerPct > 30 || a.topSellerPct > 30) && (
-              <div className="rounded-xl border border-red-900/30 bg-red-950/10 p-4">
-                <h2 className="text-xs font-semibold text-red-400/80 mb-3">Risk Alerts</h2>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  {a.losingDeals.length > 0 && (
-                    <div className="flex items-start gap-3 text-xs">
-                      <span className="text-red-500 mt-0.5">●</span>
-                      <div>
-                        <span className="text-zinc-300 font-medium">{a.losingDeals.length} deals with negative P&L</span>
-                        <span className="text-red-400/70 ml-2">({fmtCurrency(a.totalLoss)} total loss)</span>
-                      </div>
-                    </div>
-                  )}
-                  {a.overdueReceivables.length > 0 && (
-                    <div className="flex items-start gap-3 text-xs">
-                      <span className="text-amber-500 mt-0.5">●</span>
-                      <div>
-                        <span className="text-zinc-300 font-medium">{a.overdueReceivables.length} at-port deals with uncollected payments</span>
-                        <span className="text-amber-400/70 ml-2">({fmtCurrency(a.overdueReceivableAmount)})</span>
-                      </div>
-                    </div>
-                  )}
-                  {a.topBuyerPct > 30 && a.topBuyer && (
-                    <div className="flex items-start gap-3 text-xs">
-                      <span className="text-orange-500 mt-0.5">●</span>
-                      <div>
-                        <span className="text-zinc-300 font-medium">Buyer concentration: {a.topBuyer[0]}</span>
-                        <span className="text-orange-400/70 ml-2">({a.topBuyerPct.toFixed(0)}% of active sales)</span>
-                      </div>
-                    </div>
-                  )}
-                  {a.topSellerPct > 30 && a.topSeller && (
-                    <div className="flex items-start gap-3 text-xs">
-                      <span className="text-orange-500 mt-0.5">●</span>
-                      <div>
-                        <span className="text-zinc-300 font-medium">Seller concentration: {a.topSeller[0]}</span>
-                        <span className="text-orange-400/70 ml-2">({a.topSellerPct.toFixed(0)}% of active purchases)</span>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-
-            {/* ═══ 4. DEALS AT PORT — REQUIRING ATTENTION ═══ */}
-            {a.atPort.length > 0 && (
-              <Section title="At Port — Financial Close in Progress" subtitle={`${a.atPort.length} deals with shipment at port. Click any deal for full breakdown.`}>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                  {a.atPort.map((t, i) => (
-                    <DealCard key={t.id || i} trade={t} onClick={() => setSelectedDeal(t)} />
-                  ))}
-                </div>
-              </Section>
-            )}
-
-            {/* ═══ 5. OPEN POSITIONS — MONITORING REQUIRED ═══ */}
-            <Section title="Active Positions" subtitle={`${a.open.length} open deals. Click any deal for cash flow & margin breakdown.`}>
-              <div className="space-y-1">
-                {/* Summary strip */}
-                <div className="flex flex-wrap gap-2 mb-2">
-                  {a.open.filter(t => !t.buyer || !t.seller).length > 0 && (
-                    <span className="px-2 py-1 rounded bg-amber-900/20 border border-amber-800/30 text-[11px] text-amber-400">
-                      {a.open.filter(t => !t.buyer || !t.seller).length} without counterparty
-                    </span>
-                  )}
-                  {a.open.filter(t => n(t.net_profit) < 0).length > 0 && (
-                    <span className="px-2 py-1 rounded bg-red-900/20 border border-red-800/30 text-[11px] text-red-400">
-                      {a.open.filter(t => n(t.net_profit) < 0).length} with negative P&L
-                    </span>
-                  )}
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                  {a.open.sort((x, y) => Math.abs(n(y.purchase_value)) - Math.abs(n(x.purchase_value))).map((t, i) => (
-                    <DealCard key={t.id || i} trade={t} onClick={() => setSelectedDeal(t)} />
-                  ))}
-                </div>
-              </div>
-            </Section>
-
-            {/* ═══ 6. P&L PERFORMANCE ═══ */}
-            <Section title="P&L by Commodity" subtitle="Net profit contribution across all trades">
-              <div className="rounded-xl border border-zinc-800 bg-zinc-900/30 p-4">
-                <div className="space-y-1.5">
-                  {a.profitByCommodity.slice(0, 10).map(([name, profit]) => {
-                    const maxVal = Math.max(...a.profitByCommodity.map(([, v]) => Math.abs(v)), 1);
-                    const w = Math.max(4, (Math.abs(profit) / maxVal) * 100);
-                    return (
-                      <div key={name} className="flex items-center gap-2 text-xs">
-                        <span className="w-28 truncate text-zinc-300 text-right shrink-0">{name}</span>
-                        <div className="flex-1 h-5 bg-zinc-800/50 rounded overflow-hidden">
-                          <div className={`h-full rounded ${profit >= 0 ? "bg-emerald-600" : "bg-red-600"}`} style={{ width: `${w}%` }} />
-                        </div>
-                        <span className={`w-20 text-right font-mono shrink-0 text-[11px] ${profit >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                          {fmtCurrency(profit)}
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            </Section>
-
-            {/* ═══ 7. P&L HEATMAP ═══ */}
-            {a.topProducts.length > 0 && a.topOrigins.length > 0 && (
-              <Section title="P&L Heatmap — Commodity x Origin" subtitle="Net profit by trade corridor. Green = profitable, Red = losing">
-                <div className="rounded-xl border border-zinc-800 bg-zinc-900/30 p-4 overflow-x-auto">
-                  <table className="text-xs border-collapse">
-                    <thead>
-                      <tr>
-                        <th className="px-3 py-2 text-left text-zinc-500 font-medium" />
-                        {a.topOrigins.map(o => <th key={o} className="px-3 py-2 text-zinc-400 font-medium whitespace-nowrap">{o}</th>)}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {a.topProducts.map((p, pi) => (
-                        <tr key={p}>
-                          <td className="px-3 py-2 text-zinc-300 font-medium whitespace-nowrap">{p}</td>
-                          {a.heatmap[pi].map((cell, oi) => {
-                            if (cell.count === 0) return <td key={oi} className="px-3 py-2 text-center text-zinc-700">·</td>;
-                            const pos = cell.profit >= 0;
-                            const maxP = Math.max(...a.heatmap.flat().map(c => Math.abs(c.profit)), 1);
-                            const intensity = Math.min(Math.abs(cell.profit) / maxP, 1);
-                            return (
-                              <td key={oi} className="px-3 py-2 text-center" style={{
-                                backgroundColor: pos
-                                  ? `rgba(16, 185, 129, ${0.08 + intensity * 0.35})`
-                                  : `rgba(239, 68, 68, ${0.08 + intensity * 0.35})`,
-                              }}>
-                                <div className={`font-mono font-medium ${pos ? "text-emerald-300" : "text-red-300"}`}>{fmtCurrency(cell.profit)}</div>
-                                <div className="text-[10px] text-zinc-500">{cell.count} trades</div>
-                              </td>
-                            );
-                          })}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </Section>
-            )}
-
-            {/* ═══ 8. CASH FLOW & EXPENSES ═══ */}
-            <Section title="Cash Flow & Expenses" subtitle="Company-wide financial position">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="rounded-xl border border-zinc-800 bg-zinc-900/30 p-4">
-                  <h3 className="text-xs font-medium text-zinc-400 mb-3">Cash Flow</h3>
-                  <div className="space-y-2.5">
-                    <div className="flex justify-between text-xs">
-                      <span className="text-zinc-400">Total Paid to Sellers</span>
-                      <span className="text-red-400 font-mono">{fmtFull(a.totalOutwards)}</span>
-                    </div>
-                    <div className="flex justify-between text-xs">
-                      <span className="text-zinc-400">Total Received from Buyers</span>
-                      <span className="text-emerald-400 font-mono">{fmtFull(a.totalInwards)}</span>
-                    </div>
-                    <div className="border-t border-zinc-800 my-1" />
-                    <div className="flex justify-between text-xs font-medium">
-                      <span className="text-zinc-300">Net Cash Position</span>
-                      <span className={`font-mono ${a.netCash >= 0 ? "text-emerald-400" : "text-red-400"}`}>{fmtFull(a.netCash)}</span>
-                    </div>
-                    <div className="border-t border-zinc-800 my-1" />
-                    <div className="flex justify-between text-xs">
-                      <span className="text-zinc-400">Still Owed to Sellers</span>
-                      <span className="text-amber-400 font-mono">{fmtFull(a.outwardRemaining)}</span>
-                    </div>
-                    <div className="flex justify-between text-xs">
-                      <span className="text-zinc-400">Still Owed by Buyers</span>
-                      <span className="text-amber-400 font-mono">{fmtFull(a.inwardRemaining)}</span>
-                    </div>
-                  </div>
-                </div>
-                <div className="rounded-xl border border-zinc-800 bg-zinc-900/30 p-4">
-                  <h3 className="text-xs font-medium text-zinc-400 mb-3">Expense Breakdown</h3>
-                  <div className="space-y-2.5">
-                    {a.expenseBreakdown.map(({ label, val }) => (
-                      <div key={label} className="flex justify-between text-xs">
-                        <span className="text-zinc-400">{label}</span>
-                        <span className={`font-mono ${val > 0 ? "text-red-400" : "text-emerald-400"}`}>{fmtFull(Math.abs(val))}</span>
-                      </div>
-                    ))}
-                    <div className="border-t border-zinc-800 my-1" />
-                    <div className="flex justify-between text-xs font-medium">
-                      <span className="text-zinc-300">Total Expenses</span>
-                      <span className="text-red-400 font-mono">{fmtFull(a.totalExpenses)}</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </Section>
-
-            {/* ═══ 9. EXPOSURE ANALYSIS ═══ */}
-            <Section title="Exposure Analysis" subtitle="Dollar-weighted concentration across counterparties, commodities, origins">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="rounded-xl border border-zinc-800 bg-zinc-900/30 p-4">
-                  <h3 className="text-xs font-medium text-zinc-400 mb-3">Buyer Exposure (Sales Value)</h3>
-                  <div className="space-y-1.5">
-                    {a.buyerExposure.slice(0, 8).map(([name, val]) => (
-                      <HBar key={name} label={name} value={val} max={a.buyerExposure[0]?.[1] || 1} color="bg-cyan-600" />
-                    ))}
-                  </div>
-                </div>
-                <div className="rounded-xl border border-zinc-800 bg-zinc-900/30 p-4">
-                  <h3 className="text-xs font-medium text-zinc-400 mb-3">Seller Exposure (Purchase Value)</h3>
-                  <div className="space-y-1.5">
-                    {a.sellerExposure.slice(0, 8).map(([name, val]) => (
-                      <HBar key={name} label={name} value={val} max={a.sellerExposure[0]?.[1] || 1} color="bg-purple-600" />
-                    ))}
-                  </div>
-                </div>
-                <div className="rounded-xl border border-zinc-800 bg-zinc-900/30 p-4">
-                  <h3 className="text-xs font-medium text-zinc-400 mb-3">Commodity Exposure</h3>
-                  <div className="space-y-1.5">
-                    {a.commodityExposure.slice(0, 8).map(([name, val]) => (
-                      <HBar key={name} label={name} value={val} max={a.commodityExposure[0]?.[1] || 1} color="bg-blue-600" />
-                    ))}
-                  </div>
-                </div>
-                <div className="rounded-xl border border-zinc-800 bg-zinc-900/30 p-4">
-                  <h3 className="text-xs font-medium text-zinc-400 mb-3">Origin Exposure</h3>
-                  <div className="space-y-1.5">
-                    {a.originExposure.slice(0, 8).map(([name, val]) => (
-                      <HBar key={name} label={name} value={val} max={a.originExposure[0]?.[1] || 1} color="bg-amber-600" />
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </Section>
-
-            {/* ═══ 10. WORKING CAPITAL ═══ */}
-            {a.wcBuckets.length > 0 && (
-              <Section title="Working Capital Distribution" subtitle={`Average: ${Math.round(a.avgWcDays)} days across active deals`}>
-                <div className="rounded-xl border border-zinc-800 bg-zinc-900/30 p-4">
-                  <div className="space-y-1.5">
-                    {a.wcBuckets.map(({ label, count }) => (
-                      <HBar key={label} label={label} value={count} max={Math.max(...a.wcBuckets.map(b => b.count), 1)} color="bg-orange-600" prefix="" />
-                    ))}
-                  </div>
-                </div>
-              </Section>
-            )}
-
-            {/* ═══ 11. COMPLETED DEALS PERFORMANCE ═══ */}
-            {a.completed.length > 0 && (
-              <Section title="Completed Deals — Historical Performance" subtitle={`${a.completed.length} settled trades. Click any for full margin breakdown.`}>
-                <div className="grid grid-cols-4 gap-3 mb-3">
-                  <Metric label="Realized Revenue" value={fmtCurrency(a.completedSales)} color="text-emerald-400" />
-                  <Metric label="Gross Margin" value={fmtCurrency(a.completedGrossMargin)} color={a.completedGrossMargin >= 0 ? "text-emerald-400" : "text-red-400"} />
-                  <Metric label="Net Profit" value={fmtCurrency(a.completedNetProfit)} color={a.completedNetProfit >= 0 ? "text-emerald-400" : "text-red-400"} />
-                  <Metric label="Net Margin %" value={a.completedMarginPct.toFixed(1) + "%"} color={a.completedMarginPct >= 0 ? "text-emerald-400" : "text-red-400"} />
-                </div>
-                <button onClick={() => toggleSection("completed")}
-                  className="text-xs text-zinc-500 hover:text-zinc-300 transition-colors mb-2">
-                  {expandedSection === "completed" ? "Hide deals ▾" : `Show ${a.completed.length} completed deals ▸`}
-                </button>
-                {expandedSection === "completed" && (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                    {a.completed.sort((x, y) => Math.abs(n(y.net_profit)) - Math.abs(n(x.net_profit))).map((t, i) => (
-                      <DealCard key={t.id || i} trade={t} onClick={() => setSelectedDeal(t)} />
-                    ))}
-                  </div>
-                )}
-              </Section>
-            )}
+            {activePage === "today" && <TodaysWorkPage trades={trades} stageGroups={stageGroups} onSelect={setSelectedDeal} />}
+            {activePage === "all_trades" && <TradesListPage trades={trades} title="All Trades" subtitle={`${trades.length} trades across all sheets`} onSelect={setSelectedDeal} />}
+            {activePage === "open_positions" && <TradesListPage trades={openPositions} title="Open Positions" subtitle={`${openPositions.length} non-settled trades`} onSelect={setSelectedDeal} />}
+            {activePage === "payments_out" && <PaymentsOutPage trades={trades} onSelect={setSelectedDeal} />}
+            {activePage === "payments_in" && <PaymentsInPage trades={trades} onSelect={setSelectedDeal} />}
+            {activePage === "pnl" && <PnLPage trades={trades} />}
           </>
         )}
-
-        <div className="text-center text-[11px] text-zinc-700 pt-2 pb-4">
-          Hectar CTRM · Supabase + OneDrive · Auto-sync every 5 min
-        </div>
       </main>
     </div>
   );
